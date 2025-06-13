@@ -23,26 +23,26 @@ def run_query(query):
     finally:
         cur.close()
 
-# Card types and labels (same as assumptions.py)
+# Payment method order and labels
 payment_method_order = [
     'AMEX',
     'EFTPOS',
-    'VC/MC Domestic Credit',
-    'VC/MC Domestic Debit',
-    'VC/MC Premium Credit',
-    'VC/MC Premium Debit',
-    'VC/MC Int.Credit',
-    'VC/MC Int.Debit'
+    'VC/MC Dom.CR',
+    'VC/MC Dom.DR',
+    'VC/MC Prem.CR',
+    'VC/MC Prem.DR',
+    'VC/MC Int.CR',
+    'VC/MC Int.DR'
 ]
 payment_method_labels = {
     'AMEX': 'Amex',
     'EFTPOS': 'EFTPOS',
-    'VC/MC Domestic Credit': 'VC/MC Domestic Credit',
-    'VC/MC Domestic Debit': 'VC/MC Domestic Debit',
-    'VC/MC Premium Credit': 'VC/MC Premium Credit',
-    'VC/MC Premium Debit': 'VC/MC Premium Debit',
-    'VC/MC Int.Credit': 'VC/MC Int.Credit',
-    'VC/MC Int.Debit': 'VC/MC Int.Debit',
+    'VC/MC Dom.CR': 'VC/MC Dom.CR',
+    'VC/MC Dom.DR': 'VC/MC Dom.DR',
+    'VC/MC Prem.CR': 'VC/MC Prem.CR',
+    'VC/MC Prem.DR': 'VC/MC Prem.DR',
+    'VC/MC Int.CR': 'VC/MC Int.CR',
+    'VC/MC Int.DR': 'VC/MC Int.DR',
 }
 
 # Query for TTV, MSF, COGS by payment method

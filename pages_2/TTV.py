@@ -1,44 +1,107 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import snowflake.connector
 from datetime import datetime, timedelta
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from config import SNOWFLAKE_CONFIG
 
+# Custom CSS for column widths
+# st.markdown("""
+# <style>
+#     /* First column (Business Unit) */
+#     .stTable td:nth-child(1) {
+#         min-width: 150px !important;
+#         max-width: 150px !important;
+#     }
+#     /* Payment type columns */
+#     .stTable td:nth-child(2),
+#     .stTable td:nth-child(3),
+#     .stTable td:nth-child(4),
+#     .stTable td:nth-child(5),
+#     .stTable td:nth-child(6),
+#     .stTable td:nth-child(7),
+#     .stTable td:nth-child(8),
+#     .stTable td:nth-child(9) {
+#         min-width: 120px !important;
+#         max-width: 120px !important;
+#     }
+#     /* Total column */
+#     .stTable td:nth-child(10) {
+#         min-width: 120px !important;
+#         max-width: 120px !important;
+#     }
+#     /* % of Total TTV column */
+#     .stTable td:nth-child(11) {
+#         min-width: 100px !important;
+#         max-width: 100px !important;
+#     }
+#     /* Ensure text wrapping works properly */
+#     .stTable td {
+#         white-space: normal !important;
+#         word-wrap: break-word !important;
+#     }
+#     /* Make dollar amount rows bold */
+#     .ag-row .ag-cell[col-id="Business Unit"] {
+#         font-weight: normal;
+#     }
+#     .bold-row .ag-cell {
+#         font-weight: bold !important;
+#     }
+#     .normal-row .ag-cell {
+#         font-weight: normal !important;
+#     }
+# </style>
+# """, unsafe_allow_html=True)
+
+# Title
+st.subheader("TTV Summary by Card Type")
+
+# Make Streamlit main content area and AgGrid table full width (match TTV.py)
+# (Remove or comment out this block if present)
+# st.markdown("""
+#     <style>
+#     .main .block-container {
+#         max-width: 100vw !important;
+#         padding-left: 2vw;
+#         padding-right: 2vw;
+#     }
+#     .ag-theme-material .ag-root, .ag-theme-material .ag-center-cols-clipper {
+#         min-width: 2200px !important;
+#         width: 100vw !important;
+#         max-width: 100vw !important;
+#     }
+#     </style>
+# """, unsafe_allow_html=True)
+
 # Define payment method order for all tables
 payment_method_order = [
     'AMEX',
     'EFTPOS',
-    'Domestic Debit',
-    'Domestic Credit',
-    'Premium Debit',
-    'Premium Credit',
-    'Int.Debit',
-    'Int.Credit'
+    'Dom.DR',
+    'Dom.CR',
+    'Prem.DR',
+    'Prem.CR',
+    'Int.DR',
+    'Int.CR'
 ]
 
 # Define Wpay card type percentages
 wpay_card_types = [
     ("AMEX", 0.0140),
     ("EFTPOS", 0.3208),
-    ("Domestic Debit", 0.2500),
-    ("Domestic Credit", 0.1850),
-    ("Premium Debit", 0.0952),
-    ("Premium Credit", 0.1000),
-    ("Int.Debit", 0.0050),
-    ("Int.Credit", 0.0300)
+    ("Dom.DR", 0.2500),
+    ("Dom.CR", 0.1850),
+    ("Prem.DR", 0.0952),
+    ("Prem.CR", 0.1000),
+    ("Int.DR", 0.0050),
+    ("Int.CR", 0.0300)
 ]
 
-# Helper functions for formatting
 def format_currency(value):
     if pd.isna(value) or value == 0:
         return "$0"
     return f"${value:,.0f}"
-
-def format_percent(value):
-    if pd.isna(value):
-        return "0.00%"
-    return f"{value:.2f}%"
 
 def get_previous_month():
     today = datetime.today()
@@ -59,13 +122,6 @@ def get_filter_options():
     months = sorted(df['TRADING_MONTH'].dropna().unique().tolist())
     return business_units, acquirers, months
 
-# Main content
-# Remove the dashboard intro/title/description at the top of the TTV page
-
-# Page title at the very top
-st.subheader("TTV Summary by Card Type")
-
-# Map internal acquirer values to user-friendly display names
 acquirer_display_map = {
     'adyen_managed': 'Adyen Managed',
     'adyen_balance': 'Adyen Balance',
@@ -73,18 +129,14 @@ acquirer_display_map = {
 }
 acquirer_display_reverse = {v: k for k, v in acquirer_display_map.items()}
 
-# Get filter options
 business_units, acquirers, months = get_filter_options()
 default_month = get_previous_month()
-
-# --- Combined Table Filters ---
 months_desc = sorted(months, reverse=True)
-
-# Add 'All' option to each filter
 all_bu = ["All"] + business_units
 all_acquirer = ["All"] + [acquirer_display_map.get(a, a) for a in acquirers]
 all_months = ["All"] + months_desc
 
+# Updated filter layout to match MSF/COA (larger, default columns)
 col1, col2, col3 = st.columns(3)
 with col1:
     selected_bu = st.multiselect("Business Unit", all_bu, default=["All"])
@@ -93,10 +145,8 @@ with col2:
 with col3:
     selected_months = st.multiselect("Trading Month", all_months, default=[default_month])
 
-# Map selected display names back to internal values for filtering
 selected_acquirer_internal = [acquirer_display_reverse.get(a, a) for a in selected_acquirer]
 
-# Handle 'All' logic for each filter
 def get_selected_or_all(selected, all_values):
     if "All" in selected or not selected:
         return all_values
@@ -106,7 +156,6 @@ bu_filter = get_selected_or_all(selected_bu, business_units)
 acquirer_filter = get_selected_or_all(selected_acquirer_internal, acquirers)
 month_filter = get_selected_or_all(selected_months, months_desc)
 
-# --- Combined Table Data ---
 def get_metric_data(bu_list, acquirer_list, month_list):
     conn = init_snowflake_connection()
     where_clauses = []
@@ -133,68 +182,70 @@ def get_metric_data(bu_list, acquirer_list, month_list):
             CASE 
                 WHEN payment_method_variant IN ('amex','amex_applepay','amex_googlepay') THEN 'AMEX'
                 WHEN payment_method_variant IN ('eftpos_australia','eftpos_australia_chq','eftpos_australia_sav') THEN 'EFTPOS'
-                WHEN payment_method_variant IN ('visa','mcstandardcredit','mccredit','visastandardcredit','mc') THEN 'Domestic Credit'
-                WHEN payment_method_variant IN ('visaprepaidanonymous','visastandarddebit','mcprepaidanonymous','mcdebit','maestro','mcstandarddebit') THEN 'Domestic Debit'
-                WHEN payment_method_variant IN ('visapremiumcredit','mcpremiumcredit','visacorporatecredit','visacommercialpremiumcredit','mc_applepay','visacommercialsuperpremiumcredit','visa_applepay','mccorporatecredit','visa_googlepay','mccommercialcredit','mcfleetcredit','visabusiness','mcpurchasingcredit','visapurchasingcredit','mc_googlepay','visasuperpremiumcredit','visacommercialcredit','visafleetcredit','mcsuperpremiumcredit') THEN 'Premium Credit'
-                WHEN payment_method_variant IN ('visasuperpremiumdebit','visapremiumdebit','mcsuperpremiumdebit','visacorporatedebit','mcpremiumdebit','visacommercialpremiumdebit','mccommercialdebit','mccorporatedebit','visacommercialdebit','visacommercialsuperpremiumdebit') THEN 'Premium Debit'
-                WHEN payment_method_variant IN ('discover','jcbcredit','diners') THEN 'Int.Credit'
-                WHEN payment_method_variant IN ('vpay','electron','jcbdebit','visadankort') THEN 'Int.Debit'
+                WHEN payment_method_variant IN ('visa','mcstandardcredit','mccredit','visastandardcredit','mc') THEN 'Dom.CR'
+                WHEN payment_method_variant IN ('visaprepaidanonymous','visastandarddebit','mcprepaidanonymous','mcdebit','maestro','mcstandarddebit') THEN 'Dom.DR'
+                WHEN payment_method_variant IN ('visapremiumcredit','mcpremiumcredit','visacorporatecredit','visacommercialpremiumcredit','mc_applepay','visacommercialsuperpremiumcredit','visa_applepay','mccorporatecredit','visa_googlepay','mccommercialcredit','mcfleetcredit','visabusiness','mcpurchasingcredit','visapurchasingcredit','mc_googlepay','visasuperpremiumcredit','visacommercialcredit','visafleetcredit','mcsuperpremiumcredit') THEN 'Prem.CR'
+                WHEN payment_method_variant IN ('visasuperpremiumdebit','visapremiumdebit','mcsuperpremiumdebit','visacorporatedebit','mcpremiumdebit','visacommercialpremiumdebit','mccommercialdebit','mccorporatedebit','visacommercialdebit','visacommercialsuperpremiumdebit') THEN 'Prem.DR'
+                WHEN payment_method_variant IN ('discover','jcbcredit','diners') THEN 'Int.CR'
+                WHEN payment_method_variant IN ('vpay','electron','jcbdebit','visadankort') THEN 'Int.DR'
                 ELSE 'Other'
             END AS "Card Type",
+            PAYMENT_METHOD,
+            payment_method_variant,
             LOWER(ACQUIRER) as ACQUIRER,
             SUM(ABS(TTV)) as VALUE
         FROM dia_db.public.rba_model_data
         WHERE {where_clause}
-        GROUP BY 1, 2, 3
+        GROUP BY 1, 2, 3, 4, 5
     )
     SELECT 
         "Business Unit",
         "Card Type",
+        PAYMENT_METHOD,
+        payment_method_variant,
         ACQUIRER,
         SUM(VALUE) as VALUE
     FROM base_data
-    GROUP BY 1, 2, 3
+    GROUP BY 1, 2, 3, 4, 5
     ORDER BY "Business Unit", "Card Type"
     """
     df = pd.read_sql(query, conn)
     return df
 
-# Get data
 data = get_metric_data(bu_filter, acquirer_filter, month_filter)
 
-# Build table rows
+# Build a combined table for all acquirers, with Wpay split: AMEX/EFTPOS direct, rest split among 6 types
 rows = []
 grand_total = 0
-
+other_card_types = ['Dom.DR', 'Dom.CR', 'Prem.DR', 'Prem.CR', 'Int.DR', 'Int.CR']
+other_weights = [25, 18.5, 10, 9.52, 3, 0.5]
+sum_weights = sum(other_weights)
 for bu in data['Business Unit'].unique():
     bu_data = data[data['Business Unit'] == bu]
     row = {'Business Unit': bu}
     total = 0
     card_type_values = {}
-
-    # Calculate values for each card type
+    # --- Wpay split logic ---
+    wpay_data = bu_data[bu_data['ACQUIRER'].str.contains('wpay', case=False)]
+    wpay_total = wpay_data['VALUE'].sum()
+    wpay_amex = wpay_data[wpay_data['PAYMENT_METHOD'] == 'AMEX']['VALUE'].sum()
+    wpay_eftpos = wpay_data[wpay_data['PAYMENT_METHOD'] == 'EFTPOS']['VALUE'].sum()
+    wpay_rest = wpay_total - wpay_amex - wpay_eftpos
+    # Normalized weights for the 6 card types
+    other_card_types = ['Dom.DR', 'Dom.CR', 'Prem.CR', 'Prem.DR', 'Int.CR', 'Int.DR']
+    other_weights = [25, 18.5, 10, 9.52, 3, 0.5]
+    sum_weights = sum(other_weights)
+    wpay_split = {ct: 0 for ct in payment_method_order}
+    wpay_split['AMEX'] = wpay_amex
+    wpay_split['EFTPOS'] = wpay_eftpos
+    for ct, w in zip(other_card_types, other_weights):
+        wpay_split[ct] = wpay_rest * (w / sum_weights) if wpay_rest > 0 else 0
+    # --- Sum all acquirers ---
     for card_type in payment_method_order:
-        # Only Wpay selected
-        if acquirer_filter == ["Wpay"]:
-            pct = next((pct for ct, pct in wpay_card_types if ct == card_type), 0)
-            value = bu_data[bu_data['ACQUIRER'].str.contains('wpay', case=False)]['VALUE'].sum() * pct
-        # Only Adyen Managed selected
-        elif acquirer_filter == ["Adyen Managed"]:
-            value = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['VALUE'].sum()
-        # Only Adyen Balance selected
-        elif acquirer_filter == ["Adyen Balance"]:
-            value = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['VALUE'].sum()
-        # Multiple acquirers (including All)
-        else:
-            # Adyen Managed actuals
-            adyen_managed = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['VALUE'].sum()
-            # Adyen Balance actuals
-            adyen_balance = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['VALUE'].sum()
-            # Wpay hardcoded split
-            wpay_total = bu_data[bu_data['ACQUIRER'].str.contains('wpay', case=False)]['VALUE'].sum()
-            wpay_pct = next((pct for ct, pct in wpay_card_types if ct == card_type), 0)
-            wpay_value = wpay_total * wpay_pct
-            value = adyen_managed + adyen_balance + wpay_value
+        adyen_managed = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['VALUE'].sum()
+        adyen_balance = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['VALUE'].sum()
+        wpay_value = wpay_split[card_type]
+        value = adyen_managed + adyen_balance + wpay_value
         card_type_values[card_type] = value
         total += value
     row.update(card_type_values)
@@ -206,20 +257,7 @@ for bu in data['Business Unit'].unique():
 total_row = {'Business Unit': 'Total'}
 total_sum = 0
 for card_type in payment_method_order:
-    if acquirer_filter == ["Wpay"]:
-        pct = next((pct for ct, pct in wpay_card_types if ct == card_type), 0)
-        value = data[data['ACQUIRER'].str.contains('wpay', case=False)]['VALUE'].sum() * pct
-    elif acquirer_filter == ["Adyen Managed"]:
-        value = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['VALUE'].sum()
-    elif acquirer_filter == ["Adyen Balance"]:
-        value = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['VALUE'].sum()
-    else:
-        adyen_managed = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['VALUE'].sum()
-        adyen_balance = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['VALUE'].sum()
-        wpay_total = data[data['ACQUIRER'].str.contains('wpay', case=False)]['VALUE'].sum()
-        wpay_pct = next((pct for ct, pct in wpay_card_types if ct == card_type), 0)
-        wpay_value = wpay_total * wpay_pct
-        value = adyen_managed + adyen_balance + wpay_value
+    value = sum(row[card_type] for row in rows)
     total_row[card_type] = value
     total_sum += value
 total_row['Total'] = total_sum
@@ -227,16 +265,13 @@ rows.append(total_row)
 
 # Create DataFrame with both values and percentages
 final_rows = []
-for row in rows[:-1]:  # Exclude the total row for now
-    # Add dollar amount row
+for row in rows[:-1]:
     dollar_row = {'Business Unit': row['Business Unit']}
     for card_type in payment_method_order:
         dollar_row[card_type] = format_currency(row[card_type])
     dollar_row['Total'] = format_currency(row['Total'])
     dollar_row['% Of Total'] = f"{(row['Total'] / grand_total * 100):.2f}%"
     final_rows.append(dollar_row)
-    
-    # Add percentage row (weighted average, always sums to 100%)
     pct_row = {'Business Unit': '% of TTV'}
     for card_type in payment_method_order:
         pct = (row[card_type] / row['Total'] * 100) if row['Total'] > 0 else 0
@@ -245,15 +280,12 @@ for row in rows[:-1]:  # Exclude the total row for now
     pct_row['% Of Total'] = ""
     final_rows.append(pct_row)
 
-# Add Total row
 total_dollar_row = {'Business Unit': 'Total'}
 for card_type in payment_method_order:
     total_dollar_row[card_type] = format_currency(total_row[card_type])
 total_dollar_row['Total'] = format_currency(total_sum)
 total_dollar_row['% Of Total'] = "100.00%"
 final_rows.append(total_dollar_row)
-
-# Add Total percentage row
 total_pct_row = {'Business Unit': '% of Total'}
 for card_type in payment_method_order:
     pct = (total_row[card_type] / total_sum * 100) if total_sum > 0 else 0
@@ -261,11 +293,9 @@ for card_type in payment_method_order:
 total_pct_row['Total'] = "100.00%"
 total_pct_row['% Of Total'] = ""
 final_rows.append(total_pct_row)
-
-# Create final DataFrame
 final_df = pd.DataFrame(final_rows)
 
-# Configure grid options
+# Configure grid options (match TTV.py)
 gb = GridOptionsBuilder.from_dataframe(final_df)
 gb.configure_default_column(
     resizable=True,
@@ -273,57 +303,66 @@ gb.configure_default_column(
     filterable=False,
     groupable=False
 )
+# Remove fixed widths for columns to allow auto-sizing
+gb.configure_column("Business Unit", pinned="left")
+# No width set for payment columns, let AgGrid auto-size
+# for col in payment_method_order:
+#     gb.configure_column(col, width=120)
+# gb.configure_column("Total", width=120)
+# gb.configure_column("% Of Total", width=100)
 
-# Configure specific columns
-gb.configure_column("Business Unit", pinned="left", width=150)
-for col in payment_method_order:
-    gb.configure_column(col, width=120)
-gb.configure_column("Total", width=120)
-gb.configure_column("% Of Total", width=100)
-
-# Configure cell styling
-style_jscode = JsCode('''
-function(params) {
-    let row = params.node.rowIndex;
-    let col = params.colDef.field;
-    let totalRows = params.api.getDisplayedRowCount();
-    let totalCols = params.columnApi && params.columnApi.getAllDisplayedColumns
-        ? params.columnApi.getAllDisplayedColumns().length
-        : 0;
-    let colIndex = params.columnApi && params.columnApi.getAllDisplayedColumns
-        ? params.columnApi.getAllDisplayedColumns().findIndex(c => c.colId === col)
-        : -1;
-    if ((row >= totalRows - 2) || (colIndex >= totalCols - 2 && colIndex !== -1)) {
-        return { 'backgroundColor': '#f5e9da' };
-    }
-    return {};
-}
-''')
-
+# Custom cell style for font size and padding (match TTV.py)
 gb.configure_grid_options(
     suppressRowTransform=True,
-    domLayout='normal',
-    cellStyle=style_jscode
+    domLayout='normal',  # Use normal for scrollable table
 )
-
 grid_options = gb.build()
 
-# Display the table
+# Add custom CSS for larger filter widgets and table font
+st.markdown("""
+    <style>
+    .ag-theme-material .ag-cell {
+        padding: 2px 4px !important;
+        font-size: 10px !important;
+    }
+    .ag-theme-material .ag-header-cell {
+        padding: 2px 4px !important;
+        font-size: 10px !important;
+    }
+    .stMultiSelect, .stSelectbox, .stTextInput, .stDateInput, .stNumberInput {
+        font-size: 15px !important;
+        min-width: 160px !important;
+        max-width: 320px !important;
+    }
+    @media (max-width: 700px) {
+        .ag-theme-material .ag-cell, .ag-theme-material .ag-header-cell {
+            font-size: 9px !important;
+            padding: 1px 2px !important;
+        }
+        .stMultiSelect, .stSelectbox, .stTextInput, .stDateInput, .stNumberInput {
+            font-size: 12px !important;
+            min-width: 100px !important;
+            max-width: 160px !important;
+        }
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+# Display the table using AgGrid (compact, content-width only)
 AgGrid(
     final_df,
     gridOptions=grid_options,
     allow_unsafe_jscode=True,
     theme="material",
-    height=500,
-    fit_columns_on_grid_load=False,
-    use_container_width=True,
-    custom_css={
-        ".ag-header-cell-label": {"justify-content": "center"},
-        ".ag-cell": {"min-width": "120px"}
-    }
+    height=500,  # Set a fixed height for scroll
+    # fit_columns_on_grid_load=True,  # as needed
+    # use_container_width=True,       # as needed
 )
 
-# After displaying the main table, add the summary section at the bottom
+# Add small italic note below the table and above the summary
+st.markdown('<div style="text-align:right; font-size:12px;"><i>Note: Wpay card type distributions are based on market assumptions, except for AMEX and EFTPOS, which use actual data.</i></div>', unsafe_allow_html=True)
+
+# Summary section
 st.markdown("---")
 col1, col2, col3 = st.columns(3)
 with col1:

@@ -1,20 +1,34 @@
 import streamlit as st
+st.set_page_config(page_title="Oolio Group Dashboard", layout="wide")
+
+# Make Streamlit main content area full width
+st.markdown("""
+    <style>
+    .main .block-container {
+        max-width: 100vw !important;
+        padding-left: 2vw;
+        padding-right: 2vw;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
 import pandas as pd
 from st_aggrid import AgGrid, GridOptionsBuilder
-
-st.set_page_config(page_title="Oolio Group Dashboard 2", layout="wide")
 
 # Sidebar navigation
 st.sidebar.title("Navigation (v2)")
 pages = {
     "TTV": "pages_2/TTV.py",
-    "MSF": "pages_2/MSF.py",
-    "COA": "pages_2/COA.py",
-    "GP": "pages_2/GP.py",
+    # "TTV_2": "pages_2/TTV_2.py",
+    "MSF ex GST": "pages_2/MSF.py",
+    # "MSF_2": "pages_2/MSF_2.py",
+    "COA ex GST": "pages_2/COA.py",
+    "GP ex GST": "pages_2/GP.py",
     "GP Summary": "pages_2/GP_summary.py",
     "Model Business Unit": "pages_2/model_business_unit.py",
     "Model All": "pages_2/model_all.py",
-    "Business Unit Model (with Card Types)": "pages_2/model_bu_2.py"
+    "Business Unit Model (with Card Types)": "pages_2/model_bu_2.py",
+    "Business Unit Model": "pages_2/model_bu_3.py"
 }
 page = st.sidebar.radio("Go to", ["Dashboard"] + list(pages.keys()), key="page")
 
