@@ -1,54 +1,67 @@
-PAYMENT_METHOD_VARIANT,,,,,
-visapremiumcredit,5,VC/MC Premium Credit,,AMEX,1
-mcpremiumcredit,5,VC/MC Premium Credit,,ETFPOS,2
-visacorporatecredit,5,VC/MC Premium Credit,,VC/MC Domestic Credit,3
-visaprepaidanonymous,4,VC/MC Domestic Debit,,VC/MC Domestic Debit,4
-visa,3,VC/MC Domestic Credit,,VC/MC Premium Credit,5
-visacommercialpremiumcredit,5,VC/MC Premium Credit,,VC/MC Premium Debit,6
-visasuperpremiumdebit,6,VC/MC Premium Debit,,VC/MC Int.Credit,7
-mcstandardcredit,3,VC/MC Domestic Credit,,VC/MC Int.Debit,8
-visapremiumdebit,6,VC/MC Premium Debit,,,
-mc_applepay,5,VC/MC Premium Credit,,,
-visacommercialsuperpremiumcredit,5,VC/MC Premium Credit,,,
-vpay,8,VC/MC Int.Debit,,,
-discover,7,VC/MC Int.Credit,,,
-visastandarddebit,4,VC/MC Domestic Debit,,,
-visa_applepay,5,VC/MC Premium Credit,,,
-mccredit,3,VC/MC Domestic Credit,,,
-mccorporatecredit,5,VC/MC Premium Credit,,,
-mcsuperpremiumdebit,6,VC/MC Premium Debit,,,
-visacorporatedebit,6,VC/MC Premium Debit,,,
-mcprepaidanonymous,4,VC/MC Domestic Debit,,,
-mcdebit,4,VC/MC Domestic Debit,,,
-electron,8,VC/MC Int.Debit,,,
-visa_googlepay,5,VC/MC Premium Credit,,,
-jcbdebit,8,VC/MC Int.Debit,,,
-mcpremiumdebit,6,VC/MC Premium Debit,,,
-mccommercialcredit,5,VC/MC Premium Credit,,,
-mcfleetcredit,5,VC/MC Premium Credit,,,
-visastandardcredit,3,VC/MC Domestic Credit,,,
-amex,1,AMEX,,,
-visabusiness,5,VC/MC Premium Credit,,,
-visacommercialpremiumdebit,6,VC/MC Premium Debit,,,
-maestro,4,VC/MC Domestic Debit,,,
-jcbcredit,7,VC/MC Int.Credit,,,
-amex_applepay,1,AMEX,,,
-mccommercialdebit,6,VC/MC Premium Debit,,,
-eftpos_australia,2,ETFPOS,,,
-mcpurchasingcredit,5,VC/MC Premium Credit,,,
-diners,7,VC/MC Int.Credit,,,
-eftpos_australia_chq,2,ETFPOS,,,
-mccorporatedebit,6,VC/MC Premium Debit,,,
-mcstandarddebit,4,VC/MC Domestic Debit,,,
-visapurchasingcredit,5,VC/MC Premium Credit,,,
-mc_googlepay,5,VC/MC Premium Credit,,,
-visasuperpremiumcredit,5,VC/MC Premium Credit,,,
-mc,3,VC/MC Domestic Credit,,,
-visadankort,8,VC/MC Int.Debit,,,
-amex_googlepay,1,AMEX,,,
-eftpos_australia_sav,2,ETFPOS,,,
-visacommercialcredit,5,VC/MC Premium Credit,,,
-visafleetcredit,5,VC/MC Premium Credit,,,
-visacommercialdebit,6,VC/MC Premium Debit,,,
-mcsuperpremiumcredit,5,VC/MC Premium Credit,,,
-visacommercialsuperpremiumdebit,6,VC/MC Premium Debit,,,
+PAYMENT_METHOD_VARIANT,,PAYMENT_METHOD_VARIANT,,,PAYMENT_METHOD_VARIANT,Payment Bucket,International Payment Bucket
+alipay,,,,,,,"=if issuer code not equal to AU, use this column for the bucket"
+amex,,amex,1,AMEX,amex,Amex/JCB,Amex/JCB
+amex_applepay,,amex_applepay,1,AMEX,amex_applepay,Amex/JCB,Amex/JCB
+amex_googlepay,,amex_googlepay,1,AMEX,amex_googlepay,Amex/JCB,Amex/JCB
+bcmc,,,7,VC/MC Int.Credit,bcmc,Visa/MasterCard International Card Credit,Visa/MasterCard International Card Credit
+cup,,,,,cupcredit,Visa/MasterCard International Card Credit,Visa/MasterCard International Card Credit
+cupcredit,,,7,VC/MC Int.Credit,cupdebit,Visa/MasterCard International Card Debit,Visa/MasterCard International Card Debit
+cupdebit,,,8,VC/MC Int.Debit,diners,Visa/MasterCard International Card Credit,Visa/MasterCard International Card Credit
+diners,,,7,VC/MC Int.Credit,discover,Visa/MasterCard International Card Credit,Visa/MasterCard International Card Credit
+discover,,,7,VC/MC Int.Credit,eftpos_australia,EFTPOS,EFTPOS
+eftpos_australia,,eftpos_australia,2,ETFPOS,eftpos_australia_chq,EFTPOS,EFTPOS
+eftpos_australia_chq,,eftpos_australia_chq,2,ETFPOS,eftpos_australia_sav,EFTPOS,EFTPOS
+eftpos_australia_sav,,eftpos_australia_sav,2,ETFPOS,electron,Visa/MasterCard International Card Debit,Visa/MasterCard International Card Debit
+electron,,electron,8,VC/MC Int.Debit,jcbcredit,Visa/MasterCard International Card Credit,Visa/MasterCard International Card Credit
+electron_applepay,,,,,jcbdebit,Visa/MasterCard International Card Debit,Visa/MasterCard International Card Debit
+jcb_applepay,,,,,maestro,Visa/MasterCard Domestic Consumer Debit Card,Visa/MasterCard International Card Debit
+jcbcredit,,jcbcredit,7,VC/MC Int.Credit,mc,Visa/MasterCard Domestic Consumer Credit Card,Visa/MasterCard International Card Credit
+jcbdebit,,jcbdebit,8,VC/MC Int.Debit,mc_applepay,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+maestro,,maestro,4,VC/MC Domestic Debit,mc_googlepay,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+mc,,mc,3,VC/MC Domestic Credit,mccommercialcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+mc_applepay,,mc_applepay,5,VC/MC Premium Credit,mccommercialdebit,Visa/MasterCard Domestic Premium and Commercial Card Debit Card,Visa/MasterCard International Card Debit
+mc_googlepay,,mc_googlepay,5,VC/MC Premium Credit,mccorporatecredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+mccommercialcredit,,mccommercialcredit,5,VC/MC Premium Credit,mccorporatedebit,Visa/MasterCard Domestic Premium and Commercial Card Debit Card,Visa/MasterCard International Card Debit
+mccommercialdebit,,mccommercialdebit,6,VC/MC Premium Debit,mccredit,Visa/MasterCard Domestic Consumer Credit Card,Visa/MasterCard International Card Credit
+mccorporatecredit,,mccorporatecredit,5,VC/MC Premium Credit,mcdebit,Visa/MasterCard Domestic Consumer Debit Card,Visa/MasterCard International Card Debit
+mccorporatedebit,,mccorporatedebit,6,VC/MC Premium Debit,mcfleetcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+mccredit,,mccredit,3,VC/MC Domestic Credit,mcpremiumcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+mcdebit,,mcdebit,4,VC/MC Domestic Debit,mcpremiumdebit,Visa/MasterCard Domestic Premium and Commercial Card Debit Card,Visa/MasterCard International Card Debit
+mcfleetcredit,,mcfleetcredit,5,VC/MC Premium Credit,mcprepaidanonymous,Visa/MasterCard Domestic Consumer Debit Card,Visa/MasterCard International Card Debit
+mcpremiumcredit,,mcpremiumcredit,5,VC/MC Premium Credit,mcpurchasingcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+mcpremiumdebit,,mcpremiumdebit,6,VC/MC Premium Debit,mcstandardcredit,Visa/MasterCard Domestic Consumer Credit Card,Visa/MasterCard International Card Credit
+mcprepaidanonymous,,mcprepaidanonymous,4,VC/MC Domestic Debit,mcstandarddebit,Visa/MasterCard Domestic Consumer Debit Card,Visa/MasterCard International Card Debit
+mcpurchasingcredit,,mcpurchasingcredit,5,VC/MC Premium Credit,mcsuperpremiumcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+mcstandardcredit,,mcstandardcredit,3,VC/MC Domestic Credit,mcsuperpremiumdebit,Visa/MasterCard Domestic Premium and Commercial Card Debit Card,Visa/MasterCard International Card Debit
+mcstandarddebit,,mcstandarddebit,4,VC/MC Domestic Debit,visa,Visa/MasterCard Domestic Consumer Credit Card,Visa/MasterCard International Card Credit
+mcsuperpremiumcredit,,mcsuperpremiumcredit,5,VC/MC Premium Credit,visa_applepay,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+mcsuperpremiumdebit,,mcsuperpremiumdebit,6,VC/MC Premium Debit,visa_googlepay,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+visa,,visa,3,VC/MC Domestic Credit,visabusiness,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+visa_applepay,,visa_applepay,5,VC/MC Premium Credit,visacommercialcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+visa_googlepay,,visa_googlepay,5,VC/MC Premium Credit,visacommercialdebit,Visa/MasterCard Domestic Premium and Commercial Card Debit Card,Visa/MasterCard International Card Debit
+visabusiness,,visabusiness,5,VC/MC Premium Credit,visacommercialpremiumcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+visacommercialcredit,,visacommercialcredit,5,VC/MC Premium Credit,visacommercialpremiumdebit,Visa/MasterCard Domestic Premium and Commercial Card Debit Card,Visa/MasterCard International Card Debit
+visacommercialdebit,,visacommercialdebit,6,VC/MC Premium Debit,visacommercialsuperpremiumcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+visacommercialpremiumcredit,,visacommercialpremiumcredit,5,VC/MC Premium Credit,visacommercialsuperpremiumdebit,Visa/MasterCard Domestic Premium and Commercial Card Debit Card,Visa/MasterCard International Card Debit
+visacommercialpremiumdebit,,visacommercialpremiumdebit,6,VC/MC Premium Debit,visacorporatecredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+visacommercialsuperpremiumcredit,,visacommercialsuperpremiumcredit,5,VC/MC Premium Credit,visacorporatedebit,Visa/MasterCard Domestic Premium and Commercial Card Debit Card,Visa/MasterCard International Card Debit
+visacommercialsuperpremiumdebit,,visacommercialsuperpremiumdebit,6,VC/MC Premium Debit,visadankort,Visa/MasterCard International Card Debit,Visa/MasterCard International Card Credit
+visacorporatecredit,,visacorporatecredit,5,VC/MC Premium Credit,,,
+visacorporatedebit,,visacorporatedebit,6,VC/MC Premium Debit,visadebit,Visa/MasterCard Domestic Consumer Debit Card,Visa/MasterCard International Card Debit
+visadankort,,visadankort,8,VC/MC Int.Debit,visafleetcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+visadebit,,,8,VC/MC Int.Debit,visapremiumcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+visadebit_applepay,,,,,visapremiumdebit,Visa/MasterCard Domestic Premium and Commercial Card Debit Card,Visa/MasterCard International Card Debit
+visafleetcredit,,visafleetcredit,5,VC/MC Premium Credit,visaprepaidanonymous,Visa/MasterCard Domestic Consumer Debit Card,Visa/MasterCard International Card Debit
+visapremiumcredit,,visapremiumcredit,5,VC/MC Premium Credit,visapurchasingcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+visapremiumdebit,,visapremiumdebit,6,VC/MC Premium Debit,visapurchasingdebit,Visa/MasterCard Domestic Premium and Commercial Card Debit Card,Visa/MasterCard International Card Debit
+visaprepaidanonymous,,visaprepaidanonymous,4,VC/MC Domestic Debit,visastandardcredit,Visa/MasterCard Domestic Consumer Credit Card,Visa/MasterCard International Card Credit
+visapurchasingcredit,,visapurchasingcredit,5,VC/MC Premium Credit,visastandarddebit,Visa/MasterCard Domestic Consumer Debit Card,Visa/MasterCard International Card Debit
+visapurchasingdebit,,,8,VC/MC Int.Debit,visasuperpremiumcredit,Visa/MasterCard Domestic Premium and Commercial Card Credit Card,Visa/MasterCard International Card Credit
+visastandardcredit,,visastandardcredit,3,VC/MC Domestic Credit,visasuperpremiumdebit,Visa/MasterCard Domestic Premium and Commercial Card Debit Card,Visa/MasterCard International Card Debit
+visastandarddebit,,visastandarddebit,4,VC/MC Domestic Debit,vpay,Visa/MasterCard International Card Debit,Visa/MasterCard International Card Debit
+visasuperpremiumcredit,,visasuperpremiumcredit,5,VC/MC Premium Credit,,,
+visasuperpremiumdebit,,visasuperpremiumdebit,6,VC/MC Premium Debit,,,
+vpay,,vpay,8,VC/MC Int.Debit,,,
+wechatpay,,,,,,,
+wechatpay_pos,,,,,,,
+,,,,,,,

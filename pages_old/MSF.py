@@ -35,6 +35,11 @@ def format_currency(value):
         return "$0"
     return f"${value:,.0f}"
 
+def format_percent(value):
+    if pd.isna(value):
+        return "0.00%"
+    return f"{value:.2f}%"
+
 def get_previous_month():
     today = datetime.today()
     first = today.replace(day=1)
@@ -55,10 +60,10 @@ def get_filter_options():
     return business_units, acquirers, months
 
 # Main content
-# Remove the dashboard intro/title/description at the top of the COA page
+# Remove the dashboard intro/title/description at the top of the MSF page
 
 # Page title at the very top
-st.subheader("GP Summary by Card Type")
+st.subheader("MSF Summary by Card Type")
 
 # Get filter options
 business_units, acquirers, months = get_filter_options()
@@ -66,17 +71,16 @@ default_month = get_previous_month()
 
 # --- Combined Table Filters ---
 months_desc = sorted(months, reverse=True)
+
+# Ensure all_months is defined
 all_months = ["All"] + months_desc
+
+# Add 'All' option to each filter
 all_bu = ["All"] + business_units
 
-# Acquirer display mapping
-acquirer_display_map = {
-    'adyen_managed': 'Adyen Managed',
-    'adyen_balance': 'Adyen Balance',
-    'wpay': 'Wpay'
-}
-acquirer_display_reverse = {v: k for k, v in acquirer_display_map.items()}
-all_acquirer = ["All"] + [acquirer_display_map.get(a, a) for a in acquirers]
+# Updated acquirer filter options
+acquirer_options = ["Adyen Balance", "Adyen Managed", "Wpay"]
+all_acquirer = ["All"] + acquirer_options
 
 # Updated filter layout to display in a single row
 col1, col2, col3 = st.columns(3)
@@ -94,39 +98,41 @@ def get_selected_or_all(selected, all_values):
 
 bu_filter = get_selected_or_all(selected_bu, business_units)
 
-# Use dynamic acquirer list for filtering
-selected_acquirer_internal = [acquirer_display_reverse.get(a, a) for a in selected_acquirer]
-acquirer_filter = get_selected_or_all(selected_acquirer_internal, acquirers)
+# Updated acquirer filter logic
+acquirer_map = {
+    "Adyen Managed": "adyen_managed",
+    "Adyen Balance": "adyen_balance",
+    "Wpay": "wpay"
+}
+selected_acquirer_internal = [acquirer_map[a] for a in selected_acquirer if a in acquirer_map]
+acquirer_filter = get_selected_or_all(selected_acquirer_internal, [acquirer_map[a] for a in acquirer_options if a in acquirer_map])
 
 month_filter = get_selected_or_all(selected_months, months_desc)
 
 # Add Bips toggle
-show_bips = st.toggle("Show in Bips", value=False, help="Toggle between dollar values and basis points (Bips = GP/TTV*10000)")
+show_bips = st.toggle("Show in Bips", value=False, help="Toggle between dollar values and basis points (Bips = MSF/TTV*10000)")
 
 def get_metric_data(bu_list, acquirer_list, month_list):
     conn = init_snowflake_connection()
     where_clauses = []
-    if bu_list and "All" not in bu_list:
+    if bu_list and len(bu_list) < len(business_units):
         bu_str = ", ".join([f"'{b}'" for b in bu_list])
         where_clauses.append(f"SOURCE IN ({bu_str})")
-    if acquirer_list and "All" not in acquirer_list:
-        acq_str = ", ".join([f"'{a.lower()}'" for a in acquirer_list])
+    if acquirer_list and len(acquirer_list) < len(acquirer_options):
+        acq_str = ", ".join([f"'{a}'" for a in acquirer_list])
         where_clauses.append(f"LOWER(ACQUIRER) IN ({acq_str})")
-    if month_list and "All" not in month_list:
+    if month_list and len(month_list) < len(months_desc):
         month_str = ", ".join([f"'{m}'" for m in month_list])
         where_clauses.append(f"TRADING_MONTH IN ({month_str})")
     where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
-    
     query = f"""
     WITH base_data AS (
         SELECT 
             CASE 
-                WHEN SOURCE = 'Swiftpos_Reseller' THEN 'SwiftPOS Res'
+                WHEN SOURCE = 'Swiftpos_Reseller' THEN 'SwiftPOS Reseller'
                 WHEN SOURCE = 'OolioPay' THEN 'Oolio Pay'
-                WHEN SOURCE = 'IdealPOS_Reseller' THEN 'IdealPOS Res'
+                WHEN SOURCE = 'IdealPOS_Reseller' THEN 'IdealPOS Reseller'
                 WHEN SOURCE IN ('Oolio', 'OolioPaymentPlatform') THEN 'Oolio Platform'
-                WHEN SOURCE = 'Deliverit' THEN 'Deliverit'
-                WHEN SOURCE = 'DeliverIT MoR' THEN 'DeliverIT MoR'
                 ELSE SOURCE
             END AS "Business Unit",
             CASE 
@@ -142,8 +148,9 @@ def get_metric_data(bu_list, acquirer_list, month_list):
             END AS "Card Type",
             PAYMENT_METHOD,
             LOWER(ACQUIRER) as ACQUIRER,
-            SUM(GP) as GP_VALUE,
-            SUM(TTV) as TTV_VALUE
+            SUM(MSF) as MSF_VALUE,
+            SUM(TTV) as TTV_VALUE,
+            SUM(SURCHARGE_AMOUNT) as SURCHARGE_VALUE
         FROM dia_db.public.rba_model_data
         WHERE {where_clause}
         GROUP BY 1, 2, 3, 4
@@ -153,8 +160,9 @@ def get_metric_data(bu_list, acquirer_list, month_list):
         "Card Type",
         PAYMENT_METHOD,
         ACQUIRER,
-        SUM(GP_VALUE) as GP_VALUE,
-        SUM(TTV_VALUE) as TTV_VALUE
+        SUM(MSF_VALUE) as MSF_VALUE,
+        SUM(TTV_VALUE) as TTV_VALUE,
+        SUM(SURCHARGE_VALUE) as SURCHARGE_VALUE
     FROM base_data
     GROUP BY 1, 2, 3, 4
     ORDER BY "Business Unit", "Card Type"
@@ -164,70 +172,77 @@ def get_metric_data(bu_list, acquirer_list, month_list):
 
 data = get_metric_data(bu_filter, acquirer_filter, month_filter)
 
-# --- SUMMARY METRICS ---
-st.markdown("---")
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Total Business Units", len(data['Business Unit'].unique()))
-with col2:
-    st.metric("Total Payment Methods", len(payment_method_order))
-with col3:
-    st.metric("Total GP (ex GST)", format_currency(data['GP_VALUE'].sum() / 1.1))
-
-# Table logic: same as TTV, but use GP values
+# Process the data
 rows = []
 grand_total = 0
+grand_total_ttv = 0
 other_card_types = ['Dom.DR', 'Dom.CR', 'Prem.DR', 'Prem.CR', 'Int.DR', 'Int.CR']
 other_weights = [25, 18.5, 10, 9.52, 3, 0.5]
 sum_weights = sum(other_weights)
 for bu in data['Business Unit'].unique():
     bu_data = data[data['Business Unit'] == bu]
     row = {'Business Unit': bu}
-    total_gp = 0
+    total_msf = 0
     total_ttv = 0
+    total_surcharge = 0
     card_type_values = {}
     # --- Wpay split logic ---
     wpay_data = bu_data[bu_data['ACQUIRER'].str.contains('wpay', case=False)]
-    wpay_total = wpay_data['GP_VALUE'].sum()
-    wpay_total_ttv = wpay_data['TTV_VALUE'].sum() if 'TTV_VALUE' in wpay_data.columns else 0
-    wpay_amex = wpay_data[wpay_data['PAYMENT_METHOD'] == 'AMEX']['GP_VALUE'].sum() if 'PAYMENT_METHOD' in wpay_data.columns else 0
-    wpay_amex_ttv = wpay_data[wpay_data['PAYMENT_METHOD'] == 'AMEX']['TTV_VALUE'].sum() if 'PAYMENT_METHOD' in wpay_data.columns and 'TTV_VALUE' in wpay_data.columns else 0
-    wpay_eftpos = wpay_data[wpay_data['PAYMENT_METHOD'] == 'EFTPOS']['GP_VALUE'].sum() if 'PAYMENT_METHOD' in wpay_data.columns else 0
-    wpay_eftpos_ttv = wpay_data[wpay_data['PAYMENT_METHOD'] == 'EFTPOS']['TTV_VALUE'].sum() if 'PAYMENT_METHOD' in wpay_data.columns and 'TTV_VALUE' in wpay_data.columns else 0
+    wpay_total = wpay_data['MSF_VALUE'].sum()
+    wpay_total_ttv = wpay_data['TTV_VALUE'].sum()
+    wpay_total_surcharge = wpay_data['SURCHARGE_VALUE'].sum()
+    wpay_amex = wpay_data[wpay_data['PAYMENT_METHOD'] == 'AMEX']['MSF_VALUE'].sum()
+    wpay_amex_ttv = wpay_data[wpay_data['PAYMENT_METHOD'] == 'AMEX']['TTV_VALUE'].sum()
+    wpay_amex_surcharge = wpay_data[wpay_data['PAYMENT_METHOD'] == 'AMEX']['SURCHARGE_VALUE'].sum()
+    wpay_eftpos = wpay_data[wpay_data['PAYMENT_METHOD'] == 'EFTPOS']['MSF_VALUE'].sum()
+    wpay_eftpos_ttv = wpay_data[wpay_data['PAYMENT_METHOD'] == 'EFTPOS']['TTV_VALUE'].sum()
+    wpay_eftpos_surcharge = wpay_data[wpay_data['PAYMENT_METHOD'] == 'EFTPOS']['SURCHARGE_VALUE'].sum()
     wpay_rest = wpay_total - wpay_amex - wpay_eftpos
     wpay_rest_ttv = wpay_total_ttv - wpay_amex_ttv - wpay_eftpos_ttv
+    wpay_rest_surcharge = wpay_total_surcharge - wpay_amex_surcharge - wpay_eftpos_surcharge
     wpay_split = {ct: 0 for ct in payment_method_order}
     wpay_split_ttv = {ct: 0 for ct in payment_method_order}
+    wpay_split_surcharge = {ct: 0 for ct in payment_method_order}
     wpay_split['AMEX'] = wpay_amex
     wpay_split['EFTPOS'] = wpay_eftpos
     wpay_split_ttv['AMEX'] = wpay_amex_ttv
     wpay_split_ttv['EFTPOS'] = wpay_eftpos_ttv
+    wpay_split_surcharge['AMEX'] = wpay_amex_surcharge
+    wpay_split_surcharge['EFTPOS'] = wpay_eftpos_surcharge
     for ct, w in zip(other_card_types, other_weights):
         wpay_split[ct] = wpay_rest * (w / sum_weights) if wpay_rest > 0 else 0
         wpay_split_ttv[ct] = wpay_rest_ttv * (w / sum_weights) if wpay_rest_ttv > 0 else 0
+        wpay_split_surcharge[ct] = wpay_rest_surcharge * (w / sum_weights) if wpay_rest_surcharge > 0 else 0
     # --- Sum all acquirers ---
     for card_type in payment_method_order:
-        adyen_managed = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['GP_VALUE'].sum()
-        adyen_managed_ttv = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in bu_data.columns else 0
-        adyen_balance = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['GP_VALUE'].sum()
-        adyen_balance_ttv = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in bu_data.columns else 0
+        adyen_managed = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['MSF_VALUE'].sum()
+        adyen_managed_ttv = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['TTV_VALUE'].sum()
+        adyen_managed_surcharge = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['SURCHARGE_VALUE'].sum()
+        adyen_balance = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['MSF_VALUE'].sum()
+        adyen_balance_ttv = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['TTV_VALUE'].sum()
+        adyen_balance_surcharge = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['SURCHARGE_VALUE'].sum()
         wpay_value = wpay_split[card_type]
         wpay_value_ttv = wpay_split_ttv[card_type]
-        gp_value = adyen_managed + adyen_balance + wpay_value
+        wpay_value_surcharge = wpay_split_surcharge[card_type]
+        msf_value = (adyen_managed + adyen_balance + wpay_value) / 1.1
         ttv_value = adyen_managed_ttv + adyen_balance_ttv + wpay_value_ttv
-        if show_bips and ttv_value > 0:
-            value = ((gp_value / 1.1) / ttv_value) * 10000
+        surcharge_value = adyen_managed_surcharge + adyen_balance_surcharge + wpay_value_surcharge
+        denominator = ttv_value - surcharge_value
+        if show_bips and denominator > 0:
+            value = (msf_value / denominator) * 10000
         else:
-            value = gp_value / 1.1
+            value = msf_value
         card_type_values[card_type] = value
-        total_gp += gp_value
+        total_msf += msf_value
         total_ttv += ttv_value
-    if show_bips and total_ttv > 0:
-        row['Total'] = ((total_gp / 1.1) / total_ttv) * 10000
+        total_surcharge += surcharge_value
+    if show_bips and (total_ttv - total_surcharge) > 0:
+        row['Total'] = (total_msf / (total_ttv - total_surcharge)) * 10000
     else:
-        row['Total'] = total_gp / 1.1
+        row['Total'] = sum(card_type_values.values())
     row.update(card_type_values)
     grand_total += row['Total']
+    grand_total_ttv += total_ttv
     rows.append(row)
 
 total_row = {'Business Unit': 'Total'}
@@ -235,125 +250,110 @@ total_sum = 0
 for card_type in payment_method_order:
     if acquirer_filter == ["Wpay"]:
         pct = next((pct for ct, pct in wpay_card_types if ct == card_type), 0)
-        gp = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['GP_VALUE'].sum() * pct
-        ttv = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['TTV_VALUE'].sum() * pct if 'TTV_VALUE' in data.columns else 0
+        msf = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['MSF_VALUE'].sum() * pct
+        ttv = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['TTV_VALUE'].sum() * pct
+        surcharge = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['SURCHARGE_VALUE'].sum() * pct
     elif acquirer_filter == ["Adyen Managed"]:
-        gp = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['GP_VALUE'].sum()
-        ttv = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in data.columns else 0
+        msf = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['MSF_VALUE'].sum()
+        ttv = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum()
+        surcharge = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['SURCHARGE_VALUE'].sum()
     elif acquirer_filter == ["Adyen Balance"]:
-        gp = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['GP_VALUE'].sum()
-        ttv = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in data.columns else 0
+        msf = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['MSF_VALUE'].sum()
+        ttv = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum()
+        surcharge = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['SURCHARGE_VALUE'].sum()
     else:
-        adyen_managed_gp = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['GP_VALUE'].sum()
-        adyen_managed_ttv = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in data.columns else 0
-        adyen_balance_gp = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['GP_VALUE'].sum()
-        adyen_balance_ttv = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in data.columns else 0
-        wpay_total_gp = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['GP_VALUE'].sum()
-        wpay_total_ttv = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['TTV_VALUE'].sum() if 'TTV_VALUE' in data.columns else 0
+        adyen_managed_msf = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['MSF_VALUE'].sum()
+        adyen_managed_ttv = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum()
+        adyen_managed_surcharge = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['SURCHARGE_VALUE'].sum()
+        adyen_balance_msf = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['MSF_VALUE'].sum()
+        adyen_balance_ttv = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum()
+        adyen_balance_surcharge = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['SURCHARGE_VALUE'].sum()
+        wpay_total_msf = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['MSF_VALUE'].sum()
+        wpay_total_ttv = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['TTV_VALUE'].sum()
+        wpay_total_surcharge = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['SURCHARGE_VALUE'].sum()
         wpay_pct = next((pct for ct, pct in wpay_card_types if ct == card_type), 0)
-        wpay_gp = wpay_total_gp * wpay_pct
+        wpay_msf = wpay_total_msf * wpay_pct
         wpay_ttv = wpay_total_ttv * wpay_pct
-        gp = adyen_managed_gp + adyen_balance_gp + wpay_gp
+        wpay_surcharge = wpay_total_surcharge * wpay_pct
+        msf = adyen_managed_msf + adyen_balance_msf + wpay_msf
         ttv = adyen_managed_ttv + adyen_balance_ttv + wpay_ttv
-    if show_bips and ttv > 0:
-        value = ((gp / 1.1) / ttv) * 10000
+        surcharge = adyen_managed_surcharge + adyen_balance_surcharge + wpay_surcharge
+    denominator = ttv - surcharge
+    msf_ex_gst = msf / 1.1
+    if show_bips and denominator > 0:
+        value = (msf_ex_gst / denominator) * 10000
     else:
-        value = gp / 1.1
+        value = msf_ex_gst
     total_row[card_type] = value
     total_sum += value
 total_row['Total'] = total_sum
 rows.append(total_row)
 
-# 1. Build value_rows_dollar from the original calculation (before any BIPS logic)
-value_rows_dollar = []
-for bu in data['Business Unit'].unique():
-    bu_data = data[data['Business Unit'] == bu]
-    value_row = {'Business Unit': bu}
-    ttv_row = {}
-    total_gp = 0
-    total_ttv = 0
-    for card_type in payment_method_order:
-        gp = bu_data[bu_data['Card Type'] == card_type]['GP_VALUE'].sum() / 1.1
-        ttv = bu_data[bu_data['Card Type'] == card_type]['TTV_VALUE'].sum() if 'TTV_VALUE' in bu_data.columns else 0
-        value_row[card_type] = gp
-        ttv_row[card_type] = ttv
-        total_gp += gp
-        total_ttv += ttv
-    value_row['Total'] = total_gp
-    ttv_row['Total'] = total_ttv
-    value_row['TTV'] = ttv_row  # Store TTVs for BIPS calculation
-    value_rows_dollar.append(value_row)
-
-# 2. Build percent_rows and percent_of_total_col from value_rows_dollar
+# --- Calculate all percent rows and % Of Total column from dollar values (before any BIPS logic) ---
+# Prepare a list of percent rows and % Of Total values for each business unit, based on dollar values
 percent_rows = []
 percent_of_total_col = {}
-total_gp_sum = sum(row['Total'] for row in value_rows_dollar)
-for value_row in value_rows_dollar:
-    pct_row = {'Business Unit': '% of GP'}
+total_msf_sum = sum(row['Total'] for row in rows[:-1])
+for row in rows[:-1]:
+    pct_row = {'Business Unit': '% of MSF'}
     for card_type in payment_method_order:
-        pct = (value_row[card_type] / value_row['Total'] * 100) if value_row['Total'] > 0 else 0
+        pct = (row[card_type] / row['Total'] * 100) if row['Total'] > 0 else 0
         pct_row[card_type] = f"{pct:.2f}%"
     pct_row['Total'] = "100.00%"
     percent_rows.append(pct_row)
-    percent_of_total_col[value_row['Business Unit']] = f"{(value_row['Total'] / total_gp_sum * 100):.2f}%" if total_gp_sum > 0 else "0.00%"
+    percent_of_total_col[row['Business Unit']] = f"{(row['Total'] / total_msf_sum * 100):.2f}%" if total_msf_sum > 0 else "0.00%"
 
-# 3. Build the final_rows for display
+# --- Now build the final_rows for display ---
 final_rows = []
-for i, value_row in enumerate(value_rows_dollar):
+for i, row in enumerate(rows[:-1]):
     # Value row (dollar or BIPS)
-    display_row = {'Business Unit': value_row['Business Unit']}
+    dollar_row = {'Business Unit': row['Business Unit']}
     for card_type in payment_method_order:
         if show_bips:
-            ttv = value_row['TTV'][card_type]
-            gp = value_row[card_type]
-            bips = (gp / ttv * 10000) if ttv > 0 else 0
-            display_row[card_type] = f"{bips:.2f}"
+            dollar_row[card_type] = f"{row[card_type]:.2f}"
         else:
-            display_row[card_type] = format_currency(value_row[card_type])
+            dollar_row[card_type] = format_currency(row[card_type])
     if show_bips:
-        ttv_total = value_row['TTV']['Total']
-        gp_total = value_row['Total']
-        bips_total = (gp_total / ttv_total * 10000) if ttv_total > 0 else 0
-        display_row['Total'] = f"{bips_total:.2f}"
+        dollar_row['Total'] = f"{row['Total']:.2f}"
     else:
-        display_row['Total'] = format_currency(value_row['Total'])
-    display_row['% Of Total'] = percent_of_total_col[value_row['Business Unit']]
-    final_rows.append(display_row)
+        dollar_row['Total'] = format_currency(row['Total'])
+    # Always use percent_of_total_col calculated from dollar values
+    dollar_row['% Of Total'] = percent_of_total_col[row['Business Unit']]
+    final_rows.append(dollar_row)
     # Percent row (always from dollar values)
     final_rows.append(percent_rows[i])
 
-# 4. Add the total and percent-of-total row, always from value_rows_dollar
 total_dollar_row = {'Business Unit': 'Total'}
 for card_type in payment_method_order:
-    total = sum(row[card_type] for row in value_rows_dollar)
-    ttv_total = sum(row['TTV'][card_type] for row in value_rows_dollar)
     if show_bips:
-        bips = (total / ttv_total * 10000) if ttv_total > 0 else 0
-        total_dollar_row[card_type] = f"{bips:.2f}"
+        total_dollar_row[card_type] = f"{total_row[card_type]:.2f}"
     else:
-        total_dollar_row[card_type] = format_currency(total)
+        total_dollar_row[card_type] = format_currency(total_row[card_type])
 if show_bips:
-    gp_grand_total = sum(row['Total'] for row in value_rows_dollar)
-    ttv_grand_total = sum(row['TTV']['Total'] for row in value_rows_dollar)
-    bips_grand_total = (gp_grand_total / ttv_grand_total * 10000) if ttv_grand_total > 0 else 0
-    total_dollar_row['Total'] = f"{bips_grand_total:.2f}"
+    total_dollar_row['Total'] = f"{total_sum:.2f}"
 else:
-    total_dollar_row['Total'] = format_currency(sum(row['Total'] for row in value_rows_dollar))
+    total_dollar_row['Total'] = format_currency(total_sum)
 total_dollar_row['% Of Total'] = "100.00%"
 final_rows.append(total_dollar_row)
 
-# Percent of total row, always from value_rows_dollar
 total_pct_row = {'Business Unit': '% of Total'}
-grand_total = sum(row['Total'] for row in value_rows_dollar)
 for card_type in payment_method_order:
-    total = sum(row[card_type] for row in value_rows_dollar)
-    pct = (total / grand_total * 100) if grand_total > 0 else 0
+    pct = (total_row[card_type] / total_sum * 100) if total_sum > 0 else 0
     total_pct_row[card_type] = f"{pct:.2f}%"
 total_pct_row['Total'] = "100.00%"
 total_pct_row['% Of Total'] = ""
 final_rows.append(total_pct_row)
 
 final_df = pd.DataFrame(final_rows)
+
+# Display the table
+gb = GridOptionsBuilder.from_dataframe(final_df)
+gb.configure_default_column(resizable=True, sorteable=False, filterable=False, groupable=False, width=60)
+gb.configure_column("Business Unit", pinned="left", width=90)
+for col in payment_method_order:
+    gb.configure_column(col, width=60)
+gb.configure_column("Total", width=60)
+gb.configure_column("% Of Total", width=60)
 
 # Add custom CSS for smallest font and responsive compactness
 st.markdown("""
@@ -376,13 +376,6 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Display the table using AgGrid (compact, content-width only)
-gb = GridOptionsBuilder.from_dataframe(final_df)
-gb.configure_default_column(resizable=True, sorteable=False, filterable=False, groupable=False, width=60)
-gb.configure_column("Business Unit", pinned="left", width=90)
-for col in payment_method_order:
-    gb.configure_column(col, width=60)
-gb.configure_column("Total", width=60)
-gb.configure_column("% Of Total", width=60)
 AgGrid(
     final_df,
     gridOptions=gb.build(),
@@ -395,10 +388,15 @@ AgGrid(
 # Add small italic note below the table and above the summary
 st.markdown('<div style="text-align:right; font-size:12px;"><i>Note: Wpay card type distributions are based on market assumptions, except for AMEX and EFTPOS, which use actual data.</i></div>', unsafe_allow_html=True)
 
-st.markdown('''
-    <style>
-    .main .block-container {
-        padding-top: 1rem !important;
-    }
-    </style>
-''', unsafe_allow_html=True)
+# Summary at the bottom
+st.markdown("---")
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("Total Business Units", len(data['Business Unit'].unique()))
+with col2:
+    st.metric("Total Payment Methods", len(payment_method_order))
+with col3:
+    if show_bips:
+        st.metric("Average Bips", f"{grand_total/len(data['Business Unit'].unique()):.2f}")
+    else:
+        st.metric("Total MSF", format_currency(data['MSF_VALUE'].sum() / 1.1)) 

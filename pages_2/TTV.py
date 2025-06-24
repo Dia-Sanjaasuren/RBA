@@ -6,55 +6,7 @@ from datetime import datetime, timedelta
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from config import SNOWFLAKE_CONFIG
 
-# Custom CSS for column widths
-# st.markdown("""
-# <style>
-#     /* First column (Business Unit) */
-#     .stTable td:nth-child(1) {
-#         min-width: 150px !important;
-#         max-width: 150px !important;
-#     }
-#     /* Payment type columns */
-#     .stTable td:nth-child(2),
-#     .stTable td:nth-child(3),
-#     .stTable td:nth-child(4),
-#     .stTable td:nth-child(5),
-#     .stTable td:nth-child(6),
-#     .stTable td:nth-child(7),
-#     .stTable td:nth-child(8),
-#     .stTable td:nth-child(9) {
-#         min-width: 120px !important;
-#         max-width: 120px !important;
-#     }
-#     /* Total column */
-#     .stTable td:nth-child(10) {
-#         min-width: 120px !important;
-#         max-width: 120px !important;
-#     }
-#     /* % of Total TTV column */
-#     .stTable td:nth-child(11) {
-#         min-width: 100px !important;
-#         max-width: 100px !important;
-#     }
-#     /* Ensure text wrapping works properly */
-#     .stTable td {
-#         white-space: normal !important;
-#         word-wrap: break-word !important;
-#     }
-#     /* Make dollar amount rows bold */
-#     .ag-row .ag-cell[col-id="Business Unit"] {
-#         font-weight: normal;
-#     }
-#     .bold-row .ag-cell {
-#         font-weight: bold !important;
-#     }
-#     .normal-row .ag-cell {
-#         font-weight: normal !important;
-#     }
-# </style>
-# """, unsafe_allow_html=True)
-
-# Title
+# Page title
 st.subheader("TTV Summary by Card Type")
 
 # Make Streamlit main content area and AgGrid table full width (match TTV.py)
@@ -173,10 +125,12 @@ def get_metric_data(bu_list, acquirer_list, month_list):
     WITH base_data AS (
         SELECT 
             CASE 
-                WHEN SOURCE = 'Swiftpos_Reseller' THEN 'SwiftPOS Reseller'
+                WHEN SOURCE = 'Swiftpos_Reseller' THEN 'SwiftPOS Res'
                 WHEN SOURCE = 'OolioPay' THEN 'Oolio Pay'
-                WHEN SOURCE = 'IdealPOS_Reseller' THEN 'IdealPOS Reseller'
+                WHEN SOURCE = 'IdealPOS_Reseller' THEN 'IdealPOS Res'
                 WHEN SOURCE IN ('Oolio', 'OolioPaymentPlatform') THEN 'Oolio Platform'
+                WHEN SOURCE = 'Deliverit' THEN 'Deliverit'
+                WHEN SOURCE = 'DeliverIT MoR' THEN 'DeliverIT MoR'
                 ELSE SOURCE
             END AS "Business Unit",
             CASE 
@@ -213,6 +167,16 @@ def get_metric_data(bu_list, acquirer_list, month_list):
     return df
 
 data = get_metric_data(bu_filter, acquirer_filter, month_filter)
+
+# --- SUMMARY METRICS ---
+st.markdown("---")
+col1, col2, col3 = st.columns(3)
+with col1:
+    st.metric("Total Business Units", len(data['Business Unit'].unique()))
+with col2:
+    st.metric("Total Payment Methods", len(payment_method_order))
+with col3:
+    st.metric("Total TTV", format_currency(data['VALUE'].sum()))
 
 # Build a combined table for all acquirers, with Wpay split: AMEX/EFTPOS direct, rest split among 6 types
 rows = []
@@ -361,13 +325,3 @@ AgGrid(
 
 # Add small italic note below the table and above the summary
 st.markdown('<div style="text-align:right; font-size:12px;"><i>Note: Wpay card type distributions are based on market assumptions, except for AMEX and EFTPOS, which use actual data.</i></div>', unsafe_allow_html=True)
-
-# Summary section
-st.markdown("---")
-col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric("Total Business Units", len(data['Business Unit'].unique()))
-with col2:
-    st.metric("Total Payment Methods", len(payment_method_order))
-with col3:
-    st.metric("Total TTV", format_currency(data['VALUE'].sum())) 
