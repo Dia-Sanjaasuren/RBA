@@ -2,17 +2,78 @@ import streamlit as st
 
 st.set_page_config(
     page_title="Oolio Group Dashboard",
-    page_icon="📊",
-    layout="wide"
+    page_icon="��",
+    layout="wide",
+    initial_sidebar_state="collapsed"  # Better for mobile
 )
 
-# Make Streamlit main content area full width
+# Mobile-friendly CSS
 st.markdown("""
     <style>
+    /* Make Streamlit main content area full width */
     .main .block-container {
         max-width: 100vw !important;
         padding-left: 2vw;
         padding-right: 2vw;
+    }
+    
+    /* Mobile-friendly responsive design */
+    @media (max-width: 768px) {
+        .main .block-container {
+            padding-left: 1vw;
+            padding-right: 1vw;
+        }
+        
+        /* Make sidebar more mobile-friendly */
+        .css-1d391kg {
+            width: 100% !important;
+        }
+        
+        /* Adjust text sizes for mobile */
+        .stMarkdown h1 {
+            font-size: 1.5rem !important;
+        }
+        
+        .stMarkdown h2 {
+            font-size: 1.3rem !important;
+        }
+        
+        .stMarkdown h3 {
+            font-size: 1.1rem !important;
+        }
+        
+        /* Make buttons more touch-friendly */
+        .stButton > button {
+            min-height: 44px !important;
+            font-size: 16px !important;
+        }
+        
+        /* Adjust multiselect for mobile */
+        .stMultiSelect > div > div {
+            min-height: 44px !important;
+        }
+        
+        /* Make tables scrollable on mobile */
+        .ag-theme-material {
+            font-size: 12px !important;
+        }
+        
+        /* Ensure proper touch targets */
+        .stSelectbox > div > div {
+            min-height: 44px !important;
+        }
+    }
+    
+    /* Fix for mobile viewport */
+    @viewport {
+        width: device-width;
+        initial-scale: 1;
+    }
+    
+    /* Ensure proper scaling on mobile */
+    html {
+        -webkit-text-size-adjust: 100%;
+        -ms-text-size-adjust: 100%;
     }
     </style>
     """, unsafe_allow_html=True)
@@ -20,13 +81,13 @@ st.markdown("""
 import pandas as pd
 from st_aggrid import AgGrid, GridOptionsBuilder
 
-# Sidebar navigation
+# Sidebar navigation with mobile-friendly design
 st.sidebar.title("Oolio Group Dashboard")
 pages = {
     "TTV": "pages_2/TTV.py",
     # "TTV_2": "pages_2/TTV_2.py",
     "MSF ex GST": "pages_2/MSF.py",
-    # "MSF_2": "pages_2/MSF_2.py",
+    "MSF_2": "pages_2/MSF_2.py",
     "COA ex GST": "pages_2/COA.py",
     "GP ex GST": "pages_2/GP.py",
     "GP Summary": "pages_2/GP_summary.py",

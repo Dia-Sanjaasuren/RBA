@@ -170,6 +170,45 @@ def get_metric_data(bu_list, acquirer_list, month_list):
 
 data = get_metric_data(bu_filter, acquirer_filter, month_filter)
 
+# Ensure no NaN in Card Type and Business Unit before any filtering
+if 'Card Type' in data.columns:
+    data['Card Type'] = data['Card Type'].astype(str).fillna('')
+if 'Business Unit' in data.columns:
+    data['Business Unit'] = data['Business Unit'].astype(str).fillna('')
+
+# --- Wpay logic: construct split rows as in model_bu_2.py ---
+if not data.empty:
+    wpay_data = data[data['ACQUIRER'].str.contains('wpay', case=False, na=False)].copy()
+    wpay_agg_rows = []
+    for bu in wpay_data['Business Unit'].unique():
+        bu_wpay_data = wpay_data[wpay_data['Business Unit'] == bu]
+        wpay_amex = bu_wpay_data[bu_wpay_data['PAYMENT_METHOD'] == 'AMEX'].sum(numeric_only=True)
+        wpay_eftpos = bu_wpay_data[bu_wpay_data['PAYMENT_METHOD'] == 'EFTPOS'].sum(numeric_only=True)
+        wpay_total = bu_wpay_data.sum(numeric_only=True)
+        wpay_rest = wpay_total - wpay_amex - wpay_eftpos
+        if wpay_amex['MSF_VALUE'] > 0:
+            wpay_agg_rows.append({'Business Unit': bu, 'Card Type': 'AMEX', **wpay_amex})
+        if wpay_eftpos['MSF_VALUE'] > 0:
+            wpay_agg_rows.append({'Business Unit': bu, 'Card Type': 'EFTPOS', **wpay_eftpos})
+        other_card_types = {'Dom.DR': 0.25, 'Dom.CR': 0.185, 'Prem.DR': 0.0952, 'Prem.CR': 0.10, 'Int.DR': 0.005, 'Int.CR': 0.03}
+        total_weight = sum(other_card_types.values())
+        if wpay_rest['MSF_VALUE'] > 0 and total_weight > 0:
+            for card, weight in other_card_types.items():
+                prorated_rest = (wpay_rest * (weight / total_weight))
+                wpay_agg_rows.append({'Business Unit': bu, 'Card Type': card, **prorated_rest})
+    wpay_agg = pd.DataFrame(wpay_agg_rows)
+    # Remove original Wpay rows and append split rows
+    data = pd.concat([data[~data['ACQUIRER'].str.contains('wpay', case=False, na=False)], wpay_agg], ignore_index=True)
+    # Ensure Card Type and Business Unit columns exist and have no NaN after Wpay split
+    if 'Card Type' not in data.columns:
+        data['Card Type'] = ''
+    else:
+        data['Card Type'] = data['Card Type'].fillna('')
+    if 'Business Unit' not in data.columns:
+        data['Business Unit'] = ''
+    else:
+        data['Business Unit'] = data['Business Unit'].fillna('')
+
 # --- SUMMARY METRICS ---
 st.markdown("---")
 col1, col2, col3 = st.columns(3)
@@ -180,14 +219,14 @@ with col2:
 with col3:
     if show_bips:
         # Grand total bips calculation
-        msf_grand_total = data['MSF_VALUE'].sum() / 1.1
+        msf_grand_total = data['MSF_VALUE'].sum()
         ttv_grand_total = data['TTV_VALUE'].sum()
         surcharge_grand_total = data['SURCHARGE_VALUE'].sum()
         denominator = ttv_grand_total - surcharge_grand_total
         bips_grand_total = (msf_grand_total / denominator * 10000) if denominator > 0 else 0
         st.metric("Average Bips", f"{bips_grand_total:.2f}")
     else:
-        st.metric("Total MSF (ex GST)", format_currency(data['MSF_VALUE'].sum() / 1.1))
+        st.metric("Total MSF (ex GST)", format_currency(data['MSF_VALUE'].sum()))
 
 # Process the data
 rows = []
@@ -197,7 +236,17 @@ other_card_types = ['Dom.DR', 'Dom.CR', 'Prem.DR', 'Prem.CR', 'Int.DR', 'Int.CR'
 other_weights = [25, 18.5, 10, 9.52, 3, 0.5]
 sum_weights = sum(other_weights)
 for bu in data['Business Unit'].unique():
-    bu_data = data[data['Business Unit'] == bu]
+    bu_data = data[data['Business Unit'] == bu].copy().reset_index(drop=True)
+    # Debug: print DataFrame info
+    print(f"BU: {bu}, len(bu_data): {len(bu_data)}, columns: {bu_data.columns.tolist()}")
+    if 'Card Type' in bu_data.columns:
+        print(f"Card Types: {bu_data['Card Type'].unique()}")
+    if 'ACQUIRER' in bu_data.columns:
+        print(f"Acquirers: {bu_data['ACQUIRER'].unique()}")
+    if bu_data.empty or 'Card Type' not in bu_data.columns or 'ACQUIRER' not in bu_data.columns:
+        print(f"Skipping BU: {bu} due to missing data or columns.")
+        continue
+    bu_data['Card Type'] = bu_data['Card Type'].astype(str).fillna('')
     row = {'Business Unit': bu}
     total_msf = 0
     total_ttv = 0
@@ -232,16 +281,33 @@ for bu in data['Business Unit'].unique():
         wpay_split_surcharge[ct] = wpay_rest_surcharge * (w / sum_weights) if wpay_rest_surcharge > 0 else 0
     # --- Sum all acquirers ---
     for card_type in payment_method_order:
-        adyen_managed = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['MSF_VALUE'].sum()
-        adyen_managed_ttv = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['TTV_VALUE'].sum()
-        adyen_managed_surcharge = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['SURCHARGE_VALUE'].sum()
-        adyen_balance = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['MSF_VALUE'].sum()
-        adyen_balance_ttv = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['TTV_VALUE'].sum()
-        adyen_balance_surcharge = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['SURCHARGE_VALUE'].sum()
+        # Defensive masks for Adyen Managed
+        acq_mask = bu_data['ACQUIRER'].astype(str).fillna('') == 'adyen_managed'
+        ct_mask = bu_data['Card Type'].astype(str).fillna('') == str(card_type)
+        mask = acq_mask & ct_mask
+        mask = mask.fillna(False).astype(bool)
+        print(f"Adyen Managed mask: len(mask)={len(mask)}, sum(mask)={mask.sum()}, card_type={card_type}")
+        if len(mask) != len(bu_data):
+            print(f"ERROR: Adyen Managed mask length {len(mask)} != DataFrame length {len(bu_data)}")
+            continue
+        adyen_managed = bu_data[mask]['MSF_VALUE'].sum()
+        adyen_managed_ttv = bu_data[mask]['TTV_VALUE'].sum()
+        adyen_managed_surcharge = bu_data[mask]['SURCHARGE_VALUE'].sum()
+        # Defensive masks for Adyen Balance
+        acq_mask = bu_data['ACQUIRER'].astype(str).fillna('') == 'adyen_balance'
+        mask = acq_mask & ct_mask
+        mask = mask.fillna(False).astype(bool)
+        print(f"Adyen Balance mask: len(mask)={len(mask)}, sum(mask)={mask.sum()}, card_type={card_type}")
+        if len(mask) != len(bu_data):
+            print(f"ERROR: Adyen Balance mask length {len(mask)} != DataFrame length {len(bu_data)}")
+            continue
+        adyen_balance = bu_data[mask]['MSF_VALUE'].sum()
+        adyen_balance_ttv = bu_data[mask]['TTV_VALUE'].sum()
+        adyen_balance_surcharge = bu_data[mask]['SURCHARGE_VALUE'].sum()
         wpay_value = wpay_split[card_type]
         wpay_value_ttv = wpay_split_ttv[card_type]
         wpay_value_surcharge = wpay_split_surcharge[card_type]
-        msf_value = (adyen_managed + adyen_balance + wpay_value) / 1.1
+        msf_value = (adyen_managed + adyen_balance + wpay_value)
         ttv_value = adyen_managed_ttv + adyen_balance_ttv + wpay_value_ttv
         surcharge_value = adyen_managed_surcharge + adyen_balance_surcharge + wpay_value_surcharge
         denominator = ttv_value - surcharge_value
@@ -296,7 +362,7 @@ for card_type in payment_method_order:
         ttv = adyen_managed_ttv + adyen_balance_ttv + wpay_ttv
         surcharge = adyen_managed_surcharge + adyen_balance_surcharge + wpay_surcharge
     denominator = ttv - surcharge
-    msf_ex_gst = msf / 1.1
+    msf_ex_gst = msf
     if show_bips and denominator > 0:
         value = (msf_ex_gst / denominator) * 10000
     else:
@@ -309,7 +375,17 @@ rows.append(total_row)
 # 1. Build value_rows_dollar from the original calculation (before any BIPS logic)
 value_rows_dollar = []
 for bu in data['Business Unit'].unique():
-    bu_data = data[data['Business Unit'] == bu]
+    bu_data = data[data['Business Unit'] == bu].copy().reset_index(drop=True)
+    # Debug: print DataFrame info
+    print(f"BU: {bu}, len(bu_data): {len(bu_data)}, columns: {bu_data.columns.tolist()}")
+    if 'Card Type' in bu_data.columns:
+        print(f"Card Types: {bu_data['Card Type'].unique()}")
+    if 'ACQUIRER' in bu_data.columns:
+        print(f"Acquirers: {bu_data['ACQUIRER'].unique()}")
+    if bu_data.empty or 'Card Type' not in bu_data.columns or 'ACQUIRER' not in bu_data.columns:
+        print(f"Skipping BU: {bu} due to missing data or columns.")
+        continue
+    bu_data['Card Type'] = bu_data['Card Type'].astype(str).fillna('')
     value_row = {'Business Unit': bu}
     ttv_row = {}
     surcharge_row = {}
@@ -317,9 +393,15 @@ for bu in data['Business Unit'].unique():
     total_ttv = 0
     total_surcharge = 0
     for card_type in payment_method_order:
-        msf = bu_data[bu_data['Card Type'] == card_type]['MSF_VALUE'].sum() / 1.1
-        ttv = bu_data[bu_data['Card Type'] == card_type]['TTV_VALUE'].sum()
-        surcharge = bu_data[bu_data['Card Type'] == card_type]['SURCHARGE_VALUE'].sum()
+        mask = (bu_data['Card Type'].astype(str).fillna('') == str(card_type))
+        mask = mask.fillna(False).astype(bool)
+        print(f"Value row mask: len(mask)={len(mask)}, sum(mask)={mask.sum()}, card_type={card_type}")
+        if len(mask) != len(bu_data):
+            print(f"ERROR: Value row mask length {len(mask)} != DataFrame length {len(bu_data)}")
+            continue
+        msf = bu_data[mask]['MSF_VALUE'].sum()
+        ttv = bu_data[mask]['TTV_VALUE'].sum()
+        surcharge = bu_data[mask]['SURCHARGE_VALUE'].sum()
         value_row[card_type] = msf
         ttv_row[card_type] = ttv
         surcharge_row[card_type] = surcharge
@@ -388,14 +470,14 @@ for card_type in payment_method_order:
     else:
         total_dollar_row[card_type] = format_currency(total)
 if show_bips:
-    msf_grand_total = data['MSF_VALUE'].sum() / 1.1
+    msf_grand_total = data['MSF_VALUE'].sum()
     ttv_grand_total = data['TTV_VALUE'].sum()
     surcharge_grand_total = data['SURCHARGE_VALUE'].sum()
     denominator = ttv_grand_total - surcharge_grand_total
     bips_grand_total = (msf_grand_total / denominator * 10000) if denominator > 0 else 0
     total_dollar_row['Total'] = f"{bips_grand_total:.2f}"
 else:
-    total_dollar_row['Total'] = format_currency(data['MSF_VALUE'].sum() / 1.1)
+    total_dollar_row['Total'] = format_currency(data['MSF_VALUE'].sum())
 total_dollar_row['% Of Total'] = "100.00%"
 final_rows.append(total_dollar_row)
 

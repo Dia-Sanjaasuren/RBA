@@ -6,6 +6,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from config import SNOWFLAKE_CONFIG
 import numpy as np
 from st_aggrid.shared import JsCode
+import numbers
 
 # Define payment method order for all tables
 payment_method_order = [
@@ -233,37 +234,33 @@ def get_metric_data(bu_list, merchant_list, acquirer_list, month_list, account_m
     wpay_agg_rows = []
     for bu in wpay_data['Business Unit'].unique():
         bu_wpay_data = wpay_data[wpay_data['Business Unit'] == bu]
-        
         # Isolate key segments
         wpay_amex = bu_wpay_data[bu_wpay_data['PAYMENT_METHOD'] == 'AMEX'].sum(numeric_only=True)
         wpay_eftpos = bu_wpay_data[bu_wpay_data['PAYMENT_METHOD'] == 'EFTPOS'].sum(numeric_only=True)
         wpay_total = bu_wpay_data.sum(numeric_only=True)
         wpay_rest = wpay_total - wpay_amex - wpay_eftpos
-        
         # Append AMEX and EFTPOS rows
         if wpay_amex['TTV'] > 0: wpay_agg_rows.append({'Business Unit': bu, 'Card Type': 'AMEX', **wpay_amex})
         if wpay_eftpos['TTV'] > 0: wpay_agg_rows.append({'Business Unit': bu, 'Card Type': 'EFTPOS', **wpay_eftpos})
-        
         # Distribute the rest by predefined weights
         other_card_types = {'Dom.DR': 0.25, 'Dom.CR': 0.185, 'Prem.DR': 0.0952, 'Prem.CR': 0.10, 'Int.DR': 0.005, 'Int.CR': 0.03}
         total_weight = sum(other_card_types.values())
-        
         if wpay_rest['TTV'] > 0 and total_weight > 0:
             for card, weight in other_card_types.items():
                 prorated_rest = (wpay_rest * (weight / total_weight))
                 wpay_agg_rows.append({'Business Unit': bu, 'Card Type': card, **prorated_rest})
-
     wpay_agg = pd.DataFrame(wpay_agg_rows)
-
     # 4. Combine Adyen and WPay aggregates to form the final "All" merchant data
     all_merchants_agg = pd.concat([adyen_agg, wpay_agg]).groupby(['Business Unit', 'Card Type']).sum().reset_index()
     all_merchants_agg['Merchant'] = 'All'
-
     # 5. Get individual merchant data (ensure required columns exist)
-    individual_merchants = df.copy()
-    
-    # 6. Combine "All" aggregate with individual merchant data
-    result_df = pd.concat([all_merchants_agg, individual_merchants], ignore_index=True)
+    group_cols = ['Business Unit', 'Merchant', 'Card Type']
+    numeric_cols = ['TTV', 'MSF', 'COA', 'SURCHARGE']
+    individual_merchants_grouped = (
+        df.groupby(group_cols)[numeric_cols].sum().reset_index()
+    )
+    # 6. Combine "All" aggregate with grouped individual merchant data
+    result_df = pd.concat([all_merchants_agg, individual_merchants_grouped], ignore_index=True)
 
     # 7. Final processing (GP, adjustments, sorting) - same as before
     result_df.fillna(0, inplace=True)
@@ -288,12 +285,11 @@ def get_metric_data(bu_list, merchant_list, acquirer_list, month_list, account_m
     
     result_df.drop(columns=['bu_ttv_total', 'merchant_ttv_total'], inplace=True)
 
-    # Re-introduce adjustment rows
+    # Restore adjustment row logic: for each BU, add an Adjustment row as the negative sum of merchant rows
     final_rows = []
     metric_cols = ['TTV', 'MSF', 'COA', 'GP', 'SURCHARGE']
     for bu, group_df in result_df.groupby('Business Unit'):
         final_rows.extend(group_df.to_dict('records'))
-        
         individual_merchants_df = group_df[group_df['Merchant'] != 'All']
         if not individual_merchants_df.empty:
             adjustment_values = individual_merchants_df[metric_cols].sum()
@@ -323,25 +319,23 @@ def process_data(df):
         if col in df.columns:
             df[col] = df[col].fillna(0)
 
-    df['MSF ex gst'] = df['MSF'] / 1.1
-    df['COA ex gst'] = df['COA'] / 1.1
-    df['GP ex gst'] = df['GP'] / 1.1
-    df['MSF Bips'] = np.where(df['TTV'] > 0, (df['MSF ex gst'] / df['TTV']) * 10000, 0)
-    df['COA Bips'] = np.where(df['TTV'] > 0, (df['COA ex gst'] / df['TTV']) * 10000, 0)
-    df['GP Bips'] = np.where(df['TTV'] > 0, (df['GP ex gst'] / df['TTV']) * 10000, 0)
+    # Remove ex GST calculations, use raw MSF, COA, GP values
+    df['MSF ex gst'] = df['MSF']
+    df['COA ex gst'] = df['COA']
+    df['GP ex gst'] = df['MSF'] - df['COA']
+    df['MSF Bips'] = np.where(df['TTV'] > 0, (df['MSF'] / df['TTV']) * 10000, 0)
+    df['COA Bips'] = np.where(df['TTV'] > 0, (df['COA'] / df['TTV']) * 10000, 0)
+    df['GP Bips'] = np.where(df['TTV'] > 0, (df['GP'] / df['TTV']) * 10000, 0)
 
     # --- New, Correct Percentage Calculation ---
-    # Calculate the TTV of the parent group for each card type row.
     parent_ttv_map = df.groupby(['Business Unit', 'Merchant'])['TTV'].sum()
     df['parent_ttv'] = df.set_index(['Business Unit', 'Merchant']).index.map(parent_ttv_map)
-    
-    # This column holds the % relative to the direct parent (BU->'All' or a specific Merchant)
     df['% of Parent Total'] = np.where(df['parent_ttv'] > 0, (df['TTV'] / df['parent_ttv']) * 100, 0)
     df.drop(columns=['parent_ttv'], inplace=True)
 
     # --- Initialize Assumption Columns ---
+    df['TTV (Base)'] = df['TTV']
     df['TTV (Assump)'] = df['TTV']
-    # This new assumption column will be used for editing % at the parent level.
     df['% of Parent Total (Assump)'] = df['% of Parent Total']
     df['MSF ex gst (Assump)'] = df['MSF ex gst']
     df['MSF Bips (Assump)'] = df['MSF Bips']
@@ -350,69 +344,96 @@ def process_data(df):
     df['GP ex gst (Assump)'] = df['GP ex gst']
     df['GP Bips (Assump)'] = df['GP Bips']
     
+    # Convert numpy types to Python types for JSON serialization
+    df = convert_numpy_types(df)
+    
     return df
+
+def convert_numpy_types(df):
+    """
+    Convert numpy types to Python types to ensure JSON serialization compatibility with AgGrid.
+    """
+    df_copy = df.copy()
+    
+    # First pass: convert column dtypes
+    for col in df_copy.columns:
+        if df_copy[col].dtype in ['int64', 'int32', 'float64', 'float32']:
+            df_copy[col] = df_copy[col].astype(object)
+    
+    # Second pass: convert individual values
+    def safe_convert(x):
+        if pd.isna(x):
+            return None
+        elif isinstance(x, np.integer):
+            return int(x)
+        elif isinstance(x, np.floating):
+            return float(x)
+        elif isinstance(x, (int, float)):
+            return x
+        else:
+            return x
+    
+    # Apply conversion to all columns
+    for col in df_copy.columns:
+        df_copy[col] = df_copy[col].apply(safe_convert)
+    
+    # Final check: ensure no numpy types remain
+    def final_check(obj):
+        if isinstance(obj, (np.integer, np.floating, np.ndarray)):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+        return obj
+    
+    # Apply final check to all values
+    for col in df_copy.columns:
+        df_copy[col] = df_copy[col].apply(final_check)
+    
+    return df_copy
 
 def recalculate_data(df):
     """
-    Recalculates all assumption values using a robust vectorized approach.
-    This honors the user's specified calculation hierarchy and avoids grouping/indexing errors.
+    When % of Parent Total (Assump) is changed for a card type, only that row's TTV (Assump) is updated using the new % and the correct group TTV (Base):
+    - If 'All' row: use BU total TTV (Base)
+    - If merchant row: use merchant total TTV (Base)
+    All other rows and columns remain unchanged.
     """
     df_copy = df.copy()
 
     # Ensure correct data types to prevent calculation errors
     numeric_cols = [
-        'TTV', 'TTV (Assump)', '% of Parent Total (Assump)',
-        'MSF ex gst', 'MSF Bips', 'MSF ex gst (Assump)', 'MSF Bips (Assump)',
-        'COA ex gst', 'COA Bips', 'COA ex gst (Assump)', 'COA Bips (Assump)',
-        'GP ex gst', 'GP Bips', 'GP ex gst (Assump)', 'GP Bips (Assump)'
+        'TTV', 'TTV (Assump)', 'TTV (Base)', '% of Parent Total (Assump)'
     ]
     for col in numeric_cols:
         if col in df_copy.columns:
             df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(0)
 
-    # Step 1: Create a map of each BU's 'All' group to its correct total base TTV.
-    card_type_rows = df_copy[df_copy['Card Type'].isin(payment_method_order)]
-    bu_total_ttv_map = card_type_rows.groupby('Business Unit')['TTV'].sum()
-    df_copy['bu_total_base_ttv'] = df_copy['Business Unit'].map(bu_total_ttv_map)
-
-    # Step 2: Identify ONLY the card type rows to perform calculations on.
+    # Only update the edited row's TTV (Assump) based on new %
     mask = df_copy['Card Type'].isin(payment_method_order)
+    diff = (df_copy['% of Parent Total (Assump)'] - df_copy['% of Parent Total']).abs()
+    edited_rows = df_copy[mask & (diff > 1e-6)]
+    for idx, row in edited_rows.iterrows():
+        if row['Merchant'] == 'All':
+            base_ttv = df_copy[(df_copy['Business Unit'] == row['Business Unit']) & (df_copy['Merchant'] == 'All')]['TTV (Base)'].sum()
+        else:
+            base_ttv = df_copy[(df_copy['Business Unit'] == row['Business Unit']) & (df_copy['Merchant'] == row['Merchant'])]['TTV (Base)'].sum()
+        new_pct = row['% of Parent Total (Assump)']
+        old_ttv_assump = row['TTV (Assump)']
+        new_ttv_assump = new_pct / 100.0 * base_ttv
+        df_copy.at[idx, 'TTV (Assump)'] = new_ttv_assump
 
-    # Step 3: Apply calculations using the mask for precision.
-    # a. Recalculate TTV (Assump) based on the parent %
-    # Use '% of Parent Total (Assump)' for the calculation
-    df_copy.loc[mask, 'TTV (Assump)'] = \
-        (df_copy.loc[mask, '% of Parent Total (Assump)'] / 100) * df_copy.loc[mask, 'bu_total_base_ttv']
-
-    # b. Recalculate MSF/COA (Assump) from BASE TTV and their Bips
-    df_copy.loc[mask, 'MSF ex gst (Assump)'] = \
-        df_copy.loc[mask, 'TTV'] * df_copy.loc[mask, 'MSF Bips (Assump)'] / 10000
-    df_copy.loc[mask, 'COA ex gst (Assump)'] = \
-        df_copy.loc[mask, 'TTV'] * df_copy.loc[mask, 'COA Bips (Assump)'] / 10000
-
-    # c. Recalculate GP (Assump)
-    df_copy.loc[mask, 'GP ex gst (Assump)'] = \
-        df_copy.loc[mask, 'MSF ex gst (Assump)'] - df_copy.loc[mask, 'COA ex gst (Assump)']
-    
-    # d. Recalculate GP Bips (Assump)
-    ttv_assump = df_copy.loc[mask, 'TTV (Assump)']
-    gp_assump = df_copy.loc[mask, 'GP ex gst (Assump)']
-    df_copy.loc[mask, 'GP Bips (Assump)'] = \
-        np.where(ttv_assump > 0, (gp_assump / ttv_assump) * 10000, 0)
-
-    # Step 4: Clean up.
-    df_copy = df_copy.drop(columns=['bu_total_base_ttv'])
-    # Only fill numeric columns to avoid Categorical errors
-    numeric_cols_cleanup = [
-        'TTV', 'TTV (Assump)', '% of Parent Total (Assump)',
-        'MSF ex gst', 'MSF Bips', 'MSF ex gst (Assump)', 'MSF Bips (Assump)',
-        'COA ex gst', 'COA Bips', 'COA ex gst (Assump)', 'COA Bips (Assump)',
-        'GP ex gst', 'GP Bips', 'GP ex gst (Assump)', 'GP Bips (Assump)'
-    ]
-    for col in numeric_cols_cleanup:
+    # Clean up
+    for col in ['TTV', 'TTV (Assump)', 'TTV (Base)', '% of Parent Total (Assump)']:
         if col in df_copy.columns:
             df_copy[col] = df_copy[col].fillna(0)
-    return df_copy 
+    
+    # Convert numpy types to Python types for JSON serialization
+    df_copy = convert_numpy_types(df_copy)
+    
+    return df_copy
 
 def apply_surcharge_ban(df):
     """
@@ -459,6 +480,112 @@ def apply_surcharge_ban(df):
         if col in df_copy.columns:
             df_copy[col] = df_copy[col].fillna(0)
     
+    # Convert numpy types to Python types for JSON serialization
+    df_copy = convert_numpy_types(df_copy)
+    
+    return df_copy
+
+# --- New function for No Surcharge on Debit+ Increase Credit Surcharge ---
+def apply_no_surcharge_increase_credit(df):
+    df_copy = df.copy()
+    numeric_cols = [
+        'TTV', 'TTV (Assump)', '% of Parent Total (Assump)',
+        'MSF ex gst', 'MSF Bips', 'MSF ex gst (Assump)', 'MSF Bips (Assump)',
+        'COA ex gst', 'COA Bips', 'COA ex gst (Assump)', 'COA Bips (Assump)',
+        'GP ex gst', 'GP Bips', 'GP ex gst (Assump)', 'GP Bips (Assump)'
+    ]
+    for col in numeric_cols:
+        if col in df_copy.columns:
+            df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(0)
+    card_col = df_copy['Card Type'].astype(str).str.strip()
+    # Step 1: Set Debit Bips to 65
+    debit_mask = card_col.isin(['EFTPOS', 'Dom.DR', 'Prem.DR'])
+    card_type_mask = card_col.isin(payment_method_order)
+    df_copy.loc[debit_mask & card_type_mask, 'MSF Bips (Assump)'] = 65
+    # Step 2: Set universal Bips for 5 card types regardless of acquirer
+    universal_bips = {
+        'AMEX': 170,
+        'Dom.CR': 160,
+        'Prem.CR': 160,
+        'Int.CR': 250,
+        'Int.DR': 250
+    }
+    for card, bips in universal_bips.items():
+        mask = card_col == card
+        df_copy.loc[mask, 'MSF Bips (Assump)'] = bips
+    # Step 3: Recalculate MSF (Assump) from BASE TTV and updated Bips (only for affected rows)
+    affected_mask = (
+        debit_mask |
+        card_col.isin(list(universal_bips.keys()))
+    ) & card_type_mask
+    df_copy.loc[affected_mask, 'MSF ex gst (Assump)'] = \
+        df_copy.loc[affected_mask, 'TTV'] * df_copy.loc[affected_mask, 'MSF Bips (Assump)'] / 10000
+    # Step 4: Recalculate GP (Assump) for affected rows
+    df_copy.loc[affected_mask, 'GP ex gst (Assump)'] = \
+        df_copy.loc[affected_mask, 'MSF ex gst (Assump)'] - df_copy.loc[affected_mask, 'COA ex gst (Assump)']
+    # Step 5: Recalculate GP Bips (Assump) for affected rows
+    ttv_assump = df_copy.loc[affected_mask, 'TTV (Assump)']
+    gp_assump = df_copy.loc[affected_mask, 'GP ex gst (Assump)']
+    df_copy.loc[affected_mask, 'GP Bips (Assump)'] = \
+        np.where(ttv_assump > 0, (gp_assump / ttv_assump) * 10000, 0)
+    for col in numeric_cols:
+        if col in df_copy.columns:
+            df_copy[col] = df_copy[col].fillna(0)
+    
+    # Convert numpy types to Python types for JSON serialization
+    df_copy = convert_numpy_types(df_copy)
+    
+    return df_copy
+
+# --- New function for Reduce COA on Credit Card ---
+def apply_reduce_coa_credit(df):
+    df_copy = df.copy()
+    numeric_cols = [
+        'TTV', 'TTV (Assump)', '% of Parent Total (Assump)',
+        'MSF ex gst', 'MSF Bips', 'MSF ex gst (Assump)', 'MSF Bips (Assump)',
+        'COA ex gst', 'COA Bips', 'COA ex gst (Assump)', 'COA Bips (Assump)',
+        'GP ex gst', 'GP Bips', 'GP ex gst (Assump)', 'GP Bips (Assump)'
+    ]
+    for col in numeric_cols:
+        if col in df_copy.columns:
+            df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(0)
+    card_col = df_copy['Card Type'].astype(str).str.strip()
+    # Reduce COA Bips (Assump) for credit cards
+    # Dom.CR: -10, Prem.CR/Int.CR/Int.DR: -30
+    domcr_mask = card_col == 'Dom.CR'
+    premcr_mask = card_col == 'Prem.CR'
+    intcr_mask = card_col == 'Int.CR'
+    intdr_mask = card_col == 'Int.DR'
+    df_copy.loc[domcr_mask, 'COA Bips (Assump)'] = df_copy.loc[domcr_mask, 'COA Bips (Assump)'] - 10
+    df_copy.loc[premcr_mask | intcr_mask | intdr_mask, 'COA Bips (Assump)'] = df_copy.loc[premcr_mask | intcr_mask | intdr_mask, 'COA Bips (Assump)'] - 30
+    # Also set MSF Bips (Assump) for these card types as in Increase Credit Surcharge button
+    universal_bips = {
+        'AMEX': 170,
+        'Dom.CR': 160,
+        'Prem.CR': 160,
+        'Int.CR': 250,
+        'Int.DR': 250
+    }
+    for card, bips in universal_bips.items():
+        mask = card_col == card
+        df_copy.loc[mask, 'MSF Bips (Assump)'] = bips
+    # Recalculate MSF (Assump), COA (Assump), and dependent values for affected rows
+    affected_mask = (
+        domcr_mask | premcr_mask | intcr_mask | intdr_mask | card_col.isin(list(universal_bips.keys()))
+    )
+    df_copy.loc[affected_mask, 'MSF ex gst (Assump)'] = df_copy.loc[affected_mask, 'TTV'] * df_copy.loc[affected_mask, 'MSF Bips (Assump)'] / 10000
+    df_copy.loc[affected_mask, 'COA ex gst (Assump)'] = df_copy.loc[affected_mask, 'TTV (Assump)'] * df_copy.loc[affected_mask, 'COA Bips (Assump)'] / 10000
+    df_copy.loc[affected_mask, 'GP ex gst (Assump)'] = df_copy.loc[affected_mask, 'MSF ex gst (Assump)'] - df_copy.loc[affected_mask, 'COA ex gst (Assump)']
+    ttv_assump = df_copy.loc[affected_mask, 'TTV (Assump)']
+    gp_assump = df_copy.loc[affected_mask, 'GP ex gst (Assump)']
+    df_copy.loc[affected_mask, 'GP Bips (Assump)'] = np.where(ttv_assump > 0, (gp_assump / ttv_assump) * 10000, 0)
+    for col in numeric_cols:
+        if col in df_copy.columns:
+            df_copy[col] = df_copy[col].fillna(0)
+    
+    # Convert numpy types to Python types for JSON serialization
+    df_copy = convert_numpy_types(df_copy)
+    
     return df_copy
 
 # --- Main data loading and caching ---
@@ -484,28 +611,37 @@ if grid_key_base not in st.session_state.edited_data:
 
 df_for_grid = st.session_state.edited_data[grid_key_base]
 
+# Filter out adjustment rows before displaying or exporting
+if 'Merchant' in df_for_grid.columns:
+    # df_for_grid = df_for_grid[df_for_grid['Merchant'] != '__ADJUSTMENT__']
+    pass
+
 st.markdown("<h5>Interactive Buttons</h5>", unsafe_allow_html=True)
 
 # --- Buttons above the table ---
-col1, col2, _ = st.columns([1, 1, 3])
+col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 3])
 with col1:
     update_button = st.button("Update Model Table", type="primary", help="Apply assumption changes to the model table")
 with col2:
     surcharge_ban_button = st.button("Surcharge Ban on Debit Card", type="primary", help="Set MSF Bips for Debit cards to 65")
+with col3:
+    no_surcharge_credit_button = st.button("Increase Credit Card Surcharge", type="primary", help="Set Debit Bips to 65 and increase Credit Surcharge Bips as specified")
+with col4:
+    reduce_coa_credit_button = st.button("Reduce COA on Credit Card", type="primary", help="Reduce COA Bips on credit cards as per business rule")
 
 # --- Display Grid ---
 total_row_data = None
+grand_total_ttv = 0
+grand_total_ttv_assump = 0
 if not df_for_grid.empty:
-    # Calculate Grand Totals for the JS valueGetters
-    grand_total_ttv = df_for_grid['TTV'].sum()
-    grand_total_ttv_assump = df_for_grid['TTV (Assump)'].sum()
-
-    total_row = {}
     all_rows_df = df_for_grid[(df_for_grid['Merchant'] == 'All') & (df_for_grid['Card Type'].isin(payment_method_order))]
+    if not all_rows_df.empty:
+        grand_total_ttv = all_rows_df['TTV'].sum()
+        grand_total_ttv_assump = all_rows_df['TTV (Assump)'].sum()
+    total_row = {}
     numeric_cols = ['TTV', 'TTV (Assump)', 'MSF ex gst', 'MSF ex gst (Assump)', 'COA ex gst', 'COA ex gst (Assump)', 'GP ex gst', 'GP ex gst (Assump)']
     for col in numeric_cols:
         total_row[col] = pd.to_numeric(all_rows_df[col], errors='coerce').sum()
-    
     bips_cols = ['MSF Bips', 'MSF Bips (Assump)', 'COA Bips', 'COA Bips (Assump)', 'GP Bips', 'GP Bips (Assump)']
     for col in bips_cols:
         ttv_col = 'TTV (Assump)' if 'Assump' in col else 'TTV'
@@ -514,11 +650,42 @@ if not df_for_grid.empty:
             total_row[col] = (pd.to_numeric(all_rows_df[col], errors='coerce') * pd.to_numeric(all_rows_df[ttv_col], errors='coerce')).sum() / total_ttv
         else:
             total_row[col] = 0
-            
     total_row['% of TTV'] = 100.0
     total_row['% of TTV (Assump)'] = 100.0
     total_row['Card Type'] = 'TOTAL'
     total_row_data = [total_row]
+
+# Final check: ensure df_for_grid has no numpy types before rendering AgGrid
+df_for_grid = convert_numpy_types(df_for_grid)
+
+# Always reset index and applymap to ensure all values are Python types
+def force_python_types(val):
+    if pd.isna(val):
+        return None
+    if isinstance(val, (np.integer, int)):
+        return int(val)
+    if isinstance(val, (np.floating, float)):
+        return float(val)
+    return val
+
+# Reset index and convert all values
+# (this replaces the previous conversion block before AgGrid)
+df_for_grid = df_for_grid.reset_index(drop=True)
+df_for_grid = df_for_grid.astype(object).applymap(force_python_types)
+
+# Also ensure columns are str (sometimes pandas can have numpy types as column names)
+df_for_grid.columns = [str(col) for col in df_for_grid.columns]
+
+# If the DataFrame is empty, show an empty table
+if df_for_grid.empty:
+    st.info("No data available for the selected merchant(s). Showing empty table.")
+    AgGrid(pd.DataFrame(columns=df_for_grid.columns))
+    st.stop()
+
+# If only one row, try to force a second dummy row (diagnostic)
+if len(df_for_grid) == 1:
+    dummy = {col: None for col in df_for_grid.columns}
+    df_for_grid = pd.concat([df_for_grid, pd.DataFrame([dummy])], ignore_index=True)
 
 assump_cell_style_right = JsCode("""
     function(params) {
@@ -654,15 +821,30 @@ grid_options = {
                 }
             """)},
             {"field": "COA ex gst (Assump)", "headerName": "Assump", "aggFunc": "sum", "editable": True, "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": assump_cell_style_right},
-            {"headerName": "Bips", "editable": True, "valueFormatter": "x == null ? '' : Number(x).toFixed(2)", "cellStyle": assump_cell_style_default, "valueGetter": JsCode("""
-                function(params) {
-                    if (!params.node.group) { return params.data['COA Bips (Assump)']; }
-                    const coa = params.node.aggData['COA ex gst (Assump)'];
-                    const ttv = params.node.aggData['TTV (Assump)'];
-                    if (ttv > 0) { return (coa / ttv) * 10000; }
-                    return 0;
-                }
-            """)}
+            {
+                "headerName": "Bips",
+                "editable": True,
+                "valueFormatter": "x == null ? '' : Number(x).toFixed(2)",
+                "cellStyle": assump_cell_style_default,
+                "valueGetter": JsCode("""
+                    function(params) {
+                        if (!params.node.group) { return params.data['COA Bips (Assump)']; }
+                        const coa = params.node.aggData['COA ex gst (Assump)'];
+                        const ttv = params.node.aggData['TTV (Assump)'];
+                        if (ttv > 0) { return (coa / ttv) * 10000; }
+                        return 0;
+                    }
+                """),
+                "valueSetter": JsCode("""
+                    function(params) {
+                        if (params.data && !params.node.group) {
+                            params.data['COA Bips (Assump)'] = Number(params.newValue);
+                            return true;
+                        }
+                        return false;
+                    }
+                """)
+            }
         ]},
         {"headerName": "GP", "headerClass": "center-aligned-header", "children": [
             {"field": "GP ex gst", "headerName": "Base", "aggFunc": "sum", "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": {"textAlign": "right"}},
@@ -715,31 +897,16 @@ grid_options = {
     "onFirstDataRendered": restore_expanded_js,
 }
 
-grid_response = AgGrid(
-    df_for_grid,
-    gridOptions=grid_options,
-    enable_enterprise_modules=True,
-    update_mode='MODEL_CHANGED',
-    theme='material',
-    height=600,
-    allow_unsafe_jscode=True,
-    key=grid_key_with_counter,
-    custom_js=get_expanded_js
-)
-
 # Store expanded keys in session state
 if 'expanded_keys' not in st.session_state:
     st.session_state['expanded_keys'] = []
-if 'custom' in grid_response and 'expanded' in grid_response['custom']:
-    st.session_state['expanded_keys'] = grid_response['custom']['expanded']
 
 # The data from the grid is the most up-to-date source
-df_from_grid = pd.DataFrame(grid_response['data']) if grid_response['data'] is not None else processed_data.copy()
+df_from_grid = processed_data.copy()
 
 if update_button:
     # Recalculate and store the data against the base key.
     st.session_state.edited_data[grid_key_base] = recalculate_data(df_from_grid)
-    # Increment the counter to force AgGrid to re-render from scratch on the next run.
     st.session_state.update_counter += 1
     st.rerun()
 
@@ -748,6 +915,16 @@ if surcharge_ban_button:
     df_surcharge = df_for_grid.copy()
     df_surcharge = apply_surcharge_ban(df_surcharge)
     st.session_state.edited_data[grid_key_base] = df_surcharge
+    st.session_state.update_counter += 1
+    st.rerun()
+
+if no_surcharge_credit_button:
+    st.session_state.edited_data[grid_key_base] = apply_no_surcharge_increase_credit(df_for_grid)
+    st.session_state.update_counter += 1
+    st.rerun()
+
+if reduce_coa_credit_button:
+    st.session_state.edited_data[grid_key_base] = apply_reduce_coa_credit(df_for_grid)
     st.session_state.update_counter += 1
     st.rerun()
 
@@ -792,3 +969,55 @@ st.markdown('''
     }
     </style>
 ''', unsafe_allow_html=True)
+
+# --- Custom styled Download CSV button at top right ---
+st.markdown("""
+    <style>
+    .stDownloadButton[data-testid="stDownloadButton"][data-key="download-csv-btn"] > button {
+        background-color: #fff;
+        color: #111;
+        border: 2px solid #111;
+        border-radius: 6px;
+        padding: 0.5em 1.5em;
+        font-weight: 600;
+        font-size: 1em;
+        box-shadow: none;
+        transition: border 0.2s;
+    }
+    .stDownloadButton[data-testid="stDownloadButton"][data-key="download-csv-btn"] > button:hover {
+        border: 2px solid #333;
+        color: #000;
+    }
+    </style>
+""", unsafe_allow_html=True)
+
+top_cols = st.columns([8, 1])
+with top_cols[1]:
+    csv = df_for_grid.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="Download as CSV",
+        data=csv,
+        file_name="model_bu_2_table.csv",
+        mime="text/csv",
+        key="download-csv-btn",
+        help="Download the current model table (All and Merchant level, with card types) as CSV."
+    )
+
+grid_response = AgGrid(
+    df_for_grid,
+    gridOptions=grid_options,
+    enable_enterprise_modules=True,
+    update_mode='MODEL_CHANGED',
+    theme='material',
+    height=600,
+    allow_unsafe_jscode=True,
+    key=grid_key_with_counter,
+    custom_js=get_expanded_js
+)
+
+# Now that grid_response is defined, we can access it
+if 'custom' in grid_response and 'expanded' in grid_response['custom']:
+    st.session_state['expanded_keys'] = grid_response['custom']['expanded']
+
+# The data from the grid is the most up-to-date source
+df_from_grid = pd.DataFrame(grid_response['data']) if grid_response['data'] is not None else processed_data.copy()

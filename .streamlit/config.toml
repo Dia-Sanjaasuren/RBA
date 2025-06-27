@@ -1,17 +1,23 @@
 [theme]
 base="light"
 primaryColor="#5D3A9B"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F0F2F6"
+textColor = "#262730"
 
 [browser]
 gatherUsageStats = false
-serverAddress = "localhost"
-serverPort = 8501
 
 [server]
-headless = false
+headless = true
 port = 8501
-enableCORS = false
-enableXsrfProtection = false
+enableCORS = true
+enableXsrfProtection = true
+maxUploadSize = 200
+address = "0.0.0.0"
 
 [ui]
-hideTopBar = true
+hideTopBar = false
+
+[client]
+showErrorDetails = true

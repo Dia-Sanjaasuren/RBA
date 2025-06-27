@@ -164,6 +164,39 @@ def get_metric_data(bu_list, acquirer_list, month_list):
 
 data = get_metric_data(bu_filter, acquirer_filter, month_filter)
 
+# --- Wpay logic: construct split rows as in model_bu_2.py ---
+if not data.empty:
+    wpay_data = data[data['ACQUIRER'].str.contains('wpay', case=False, na=False)].copy()
+    wpay_agg_rows = []
+    for bu in wpay_data['Business Unit'].unique():
+        bu_wpay_data = wpay_data[wpay_data['Business Unit'] == bu]
+        wpay_amex = bu_wpay_data[bu_wpay_data['PAYMENT_METHOD'] == 'AMEX'].sum(numeric_only=True)
+        wpay_eftpos = bu_wpay_data[bu_wpay_data['PAYMENT_METHOD'] == 'EFTPOS'].sum(numeric_only=True)
+        wpay_total = bu_wpay_data.sum(numeric_only=True)
+        wpay_rest = wpay_total - wpay_amex - wpay_eftpos
+        if wpay_amex['COA_VALUE'] > 0:
+            wpay_agg_rows.append({'Business Unit': bu, 'Card Type': 'AMEX', **wpay_amex})
+        if wpay_eftpos['COA_VALUE'] > 0:
+            wpay_agg_rows.append({'Business Unit': bu, 'Card Type': 'EFTPOS', **wpay_eftpos})
+        other_card_types = {'Dom.DR': 0.25, 'Dom.CR': 0.185, 'Prem.DR': 0.0952, 'Prem.CR': 0.10, 'Int.DR': 0.005, 'Int.CR': 0.03}
+        total_weight = sum(other_card_types.values())
+        if wpay_rest['COA_VALUE'] > 0 and total_weight > 0:
+            for card, weight in other_card_types.items():
+                prorated_rest = (wpay_rest * (weight / total_weight))
+                wpay_agg_rows.append({'Business Unit': bu, 'Card Type': card, **prorated_rest})
+    wpay_agg = pd.DataFrame(wpay_agg_rows)
+    # Remove original Wpay rows and append split rows
+    data = pd.concat([data[~data['ACQUIRER'].str.contains('wpay', case=False, na=False)], wpay_agg], ignore_index=True)
+    # Ensure Card Type and Business Unit columns exist and have no NaN after Wpay split
+    if 'Card Type' not in data.columns:
+        data['Card Type'] = ''
+    else:
+        data['Card Type'] = data['Card Type'].fillna('')
+    if 'Business Unit' not in data.columns:
+        data['Business Unit'] = ''
+    else:
+        data['Business Unit'] = data['Business Unit'].fillna('')
+
 # --- SUMMARY METRICS ---
 st.markdown("---")
 col1, col2, col3 = st.columns(3)
@@ -216,16 +249,16 @@ for bu in data['Business Unit'].unique():
         coa_value = adyen_managed + adyen_balance + wpay_value
         ttv_value = adyen_managed_ttv + adyen_balance_ttv + wpay_value_ttv
         if show_bips and ttv_value > 0:
-            value = ((coa_value / 1.1) / ttv_value) * 10000
+            value = ((coa_value) / ttv_value) * 10000
         else:
-            value = coa_value / 1.1
+            value = coa_value
         card_type_values[card_type] = value
         total_coa += coa_value
         total_ttv += ttv_value
     if show_bips and total_ttv > 0:
-        row['Total'] = ((total_coa / 1.1) / total_ttv) * 10000
+        row['Total'] = ((total_coa) / total_ttv) * 10000
     else:
-        row['Total'] = total_coa / 1.1
+        row['Total'] = total_coa
     row.update(card_type_values)
     grand_total += row['Total']
     rows.append(row)
@@ -256,9 +289,9 @@ for card_type in payment_method_order:
         coa = adyen_managed_coa + adyen_balance_coa + wpay_coa
         ttv = adyen_managed_ttv + adyen_balance_ttv + wpay_ttv
     if show_bips and ttv > 0:
-        value = ((coa / 1.1) / ttv) * 10000
+        value = ((coa) / ttv) * 10000
     else:
-        value = coa / 1.1
+        value = coa
     total_row[card_type] = value
     total_sum += value
 total_row['Total'] = total_sum
@@ -273,7 +306,7 @@ for bu in data['Business Unit'].unique():
     total_coa = 0
     total_ttv = 0
     for card_type in payment_method_order:
-        coa = bu_data[bu_data['Card Type'] == card_type]['COA_VALUE'].sum() / 1.1
+        coa = bu_data[bu_data['Card Type'] == card_type]['COA_VALUE'].sum()
         ttv = bu_data[bu_data['Card Type'] == card_type]['TTV_VALUE'].sum() if 'TTV_VALUE' in bu_data.columns else 0
         value_row[card_type] = coa
         ttv_row[card_type] = ttv
