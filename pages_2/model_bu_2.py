@@ -623,11 +623,11 @@ col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 3])
 with col1:
     update_button = st.button("Update Model Table", type="primary", help="Apply assumption changes to the model table")
 with col2:
-    surcharge_ban_button = st.button("Surcharge Ban on Debit Card", type="primary", help="Set MSF Bips for Debit cards to 65")
+    surcharge_ban_button = st.button("Scenario 1", type="primary", help="Set MSF Bips for Debit cards to 65")
 with col3:
-    no_surcharge_credit_button = st.button("Increase Credit Card Surcharge", type="primary", help="Set Debit Bips to 65 and increase Credit Surcharge Bips as specified")
+    no_surcharge_credit_button = st.button("Scenario 2", type="primary", help="Set Debit Bips to 65 and increase Credit Surcharge Bips as specified")
 with col4:
-    reduce_coa_credit_button = st.button("Reduce COA on Credit Card", type="primary", help="Reduce COA Bips on credit cards as per business rule")
+    reduce_coa_credit_button = st.button("Scenario 3", type="primary", help="Reduce COA Bips on credit cards as per business rule")
 
 # --- Display Grid ---
 total_row_data = None
@@ -1021,3 +1021,167 @@ if 'custom' in grid_response and 'expanded' in grid_response['custom']:
 
 # The data from the grid is the most up-to-date source
 df_from_grid = pd.DataFrame(grid_response['data']) if grid_response['data'] is not None else processed_data.copy()
+
+# --- Scenario Table with Default and 10 Scenarios ---
+
+# Helper: get the current total row as a dict (or None)
+def get_current_total_row():
+    if total_row_data and len(total_row_data) > 0:
+        return total_row_data[0].copy()
+    return None
+
+# Always initialize a scenario table in session state: first row is Default, next 10 are Scenario 1-10
+scenario_labels = ['Default'] + [f'Scenario {i+1}' for i in range(10)]
+key_cols = [
+    'Description',
+    'TTV', '% of TTV', 'TTV (Assump)', '% of TTV (Assump)',
+    'MSF ex gst', 'MSF Bips', 'MSF ex gst (Assump)', 'MSF Bips (Assump)',
+    'COA ex gst', 'COA Bips', 'COA ex gst (Assump)', 'COA Bips (Assump)',
+    'GP ex gst', 'GP Bips', 'GP ex gst (Assump)', 'GP Bips (Assump)'
+]
+
+# Helper: format a row for display
+currency_cols = ['TTV', 'TTV (Assump)', 'MSF ex gst', 'MSF ex gst (Assump)',
+                 'COA ex gst', 'COA ex gst (Assump)', 'GP ex gst', 'GP ex gst (Assump)']
+percent_cols = ['% of TTV', '% of TTV (Assump)']
+bips_cols = ['MSF Bips', 'MSF Bips (Assump)', 'COA Bips', 'COA Bips (Assump)', 'GP Bips', 'GP Bips (Assump)']
+def format_row(row, label):
+    formatted = {col: '' for col in key_cols}
+    for col in currency_cols:
+        if col in row:
+            try:
+                formatted[col] = f"${row[col]:,.0f}" if pd.notnull(row[col]) else ''
+            except Exception:
+                formatted[col] = row[col]
+    for col in percent_cols:
+        if col in row:
+            try:
+                formatted[col] = f"{row[col]:.2f}%" if pd.notnull(row[col]) else ''
+            except Exception:
+                formatted[col] = row[col]
+    for col in bips_cols:
+        if col in row:
+            try:
+                formatted[col] = f"{row[col]:.2f}" if pd.notnull(row[col]) else ''
+            except Exception:
+                formatted[col] = row[col]
+    formatted['Description'] = label
+    return formatted
+
+# Store the original default row in session state ONLY ONCE (on first load or after reset)
+if 'scenario_default_row' not in st.session_state:
+    base_row = get_current_total_row()
+    if base_row:
+        st.session_state['scenario_default_row'] = format_row(base_row, 'Default')
+    else:
+        st.session_state['scenario_default_row'] = {col: '' for col in key_cols}
+        st.session_state['scenario_default_row']['Description'] = 'Default'
+
+# Always initialize the scenario table rows if not present or wrong length
+if 'scenario_table_rows' not in st.session_state or len(st.session_state['scenario_table_rows']) != len(scenario_labels):
+    st.session_state['scenario_table_rows'] = []
+    st.session_state['scenario_table_rows'].append(st.session_state['scenario_default_row'].copy())
+    for label in scenario_labels[1:]:
+        row = {col: '' for col in key_cols}
+        row['Description'] = label
+        st.session_state['scenario_table_rows'].append(row)
+else:
+    # Always keep Default row as the original (never update after first set)
+    st.session_state['scenario_table_rows'][0] = st.session_state['scenario_default_row'].copy()
+
+# --- Two-Step Scenario Management ---
+# Step 1: Scenario buttons update main table (existing logic)
+# Step 2: Confirm Scenario button saves current totals to selected scenario
+
+# Initialize scenario selection in session state
+if 'selected_scenario_to_save' not in st.session_state:
+    st.session_state['selected_scenario_to_save'] = 1  # Default to Scenario 1
+
+# Scenario selection and confirm button
+st.markdown('---')
+st.markdown('<h4 style="color:#5D3A9B;">Save Current Totals to Scenario</h4>', unsafe_allow_html=True)
+col1, col2, col3 = st.columns([2, 2, 2])
+
+with col1:
+    scenario_to_save = st.selectbox(
+        "Select Scenario to Save To:",
+        options=[(i, f"Scenario {i}") for i in range(1, 11)],
+        format_func=lambda x: x[1],
+        index=st.session_state['selected_scenario_to_save'] - 1,
+        key="scenario_selector"
+    )
+    st.session_state['selected_scenario_to_save'] = scenario_to_save[0]
+
+with col2:
+    confirm_scenario_button = st.button(
+        f"Save to Scenario {scenario_to_save[0]}",
+        help=f"Save the current totals to Scenario {scenario_to_save[0]}",
+        key="confirm_scenario_btn"
+    )
+
+with col3:
+    # Show current scenario status
+    current_scenario_data = st.session_state['scenario_table_rows'][scenario_to_save[0]]
+    has_data = any(str(current_scenario_data.get(col, '')).strip() for col in currency_cols + percent_cols + bips_cols if col != 'Description')
+    status_text = "✅ Has Data" if has_data else "❌ Empty"
+    st.markdown(f"**Status:** {status_text}")
+
+# Handle confirm scenario button
+if confirm_scenario_button:
+    current_total = get_current_total_row()
+    if current_total:
+        st.session_state['scenario_table_rows'][scenario_to_save[0]] = format_row(current_total, f"Scenario {scenario_to_save[0]}")
+        st.success(f"✅ Saved current totals to Scenario {scenario_to_save[0]}")
+        st.rerun()
+
+# Reset scenario table
+if st.button('Reset Scenario Table'):
+    base_row = get_current_total_row()
+    if base_row:
+        st.session_state['scenario_default_row'] = format_row(base_row, 'Default')
+    else:
+        st.session_state['scenario_default_row'] = {col: '' for col in key_cols}
+        st.session_state['scenario_default_row']['Description'] = 'Default'
+    st.session_state['scenario_table_rows'] = []
+    st.session_state['scenario_table_rows'].append(st.session_state['scenario_default_row'].copy())
+    for label in scenario_labels[1:]:
+        row = {col: '' for col in key_cols}
+        row['Description'] = label
+        st.session_state['scenario_table_rows'].append(row)
+
+# --- Display Scenario Table ---
+st.markdown('---')
+st.markdown('<h4 style="color:#5D3A9B;">Scenario Table</h4>', unsafe_allow_html=True)
+
+# Add instructions for the scenario table
+st.markdown('''
+<div style="background-color:#f8f9fa; border-radius:8px; padding:15px; margin-bottom:15px;">
+<h5 style="margin-top:0; color:#5D3A9B;">How to Use Scenarios:</h5>
+<ol style="font-size:14px; margin-bottom:0;">
+  <li><b>Apply a scenario</b> using the buttons above (Surcharge Ban, No Surcharge Increase Credit, etc.)</li>
+  <li><b>Review the changes</b> in the main table above</li>
+  <li><b>Select a scenario slot</b> (1-10) from the dropdown</li>
+  <li><b>Click "Save to Scenario X"</b> to store the current totals</li>
+  <li><b>Repeat</b> for different scenarios to compare results</li>
+</ol>
+</div>
+''', unsafe_allow_html=True)
+
+scenario_df = pd.DataFrame(st.session_state['scenario_table_rows'])
+scenario_df = scenario_df[[col for col in key_cols if col in scenario_df.columns]]
+
+# Highlight the currently selected scenario
+def highlight_selected_scenario(row):
+    if row['Description'] == f"Scenario {st.session_state['selected_scenario_to_save']}":
+        return ['background-color: #fff3cd; font-weight: bold'] * len(row)
+    return [''] * len(row)
+
+styled = scenario_df.style
+styled = styled.set_properties(**{'text-align': 'center'})
+styled = styled.set_table_styles([
+    {'selector': 'th', 'props': [('background-color', '#002b45'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center')]},
+    {'selector': 'td', 'props': [('font-size', '15px')]},
+])
+styled = styled.apply(lambda x: ['background-color: #f2f9ff' if i%2==0 else 'background-color: #e6f0fa' for i in range(len(x))], axis=1)
+styled = styled.apply(highlight_selected_scenario, axis=1)
+st.table(styled)

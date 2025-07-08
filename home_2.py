@@ -1,8 +1,12 @@
+# Import comprehensive SSL patch first
+# import ssl_patch
+
 import streamlit as st
+from config import get_snowflake_connection
 
 st.set_page_config(
     page_title="Oolio Group Dashboard",
-    page_icon="��",
+    page_icon="",
     layout="wide",
     initial_sidebar_state="collapsed"  # Better for mobile
 )
@@ -87,7 +91,7 @@ pages = {
     "TTV": "pages_2/TTV.py",
     # "TTV_2": "pages_2/TTV_2.py",
     "MSF ex GST": "pages_2/MSF.py",
-    "MSF_2": "pages_2/MSF_2.py",
+    # "MSF_2": "pages_2/MSF_2.py",  # Removed from app
     "COA ex GST": "pages_2/COA.py",
     "GP ex GST": "pages_2/GP.py",
     "GP Summary": "pages_2/GP_summary.py",
@@ -95,6 +99,7 @@ pages = {
     # "Model All": "pages_2/model_all.py",
     "Model Table": "pages_2/model_bu_2.py",
     "Model Table V2": "pages_2/Model Table V2.py",
+    "Model Table BU4 (Backup)": "pages_2/model_bu_4_backup.py",
     # "Business Unit Model": "pages_2/model_bu_3.py"
 }
 page = st.sidebar.radio("Go to", ["Dashboard"] + list(pages.keys()), key="page")

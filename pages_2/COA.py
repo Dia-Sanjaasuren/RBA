@@ -1,3 +1,9 @@
+import os
+# Disable OCSP checks to avoid certificate validation errors
+os.environ['SF_OCSP_RESPONSE_CACHE_DIR'] = ''
+os.environ['SF_OCSP_RESPONSE_CACHE_SERVER_ENABLED'] = 'false'
+os.environ['SF_OCSP_ACTIVATE_ENDPOINT'] = 'false'
+
 import streamlit as st
 import pandas as pd
 import snowflake.connector
@@ -100,7 +106,7 @@ acquirer_filter = get_selected_or_all(selected_acquirer_internal, acquirers)
 
 month_filter = get_selected_or_all(selected_months, months_desc)
 
-# Add Bips toggle
+# Add Show in Bips toggle
 show_bips = st.toggle("Show in Bips", value=False, help="Toggle between dollar values and basis points (Bips = COA/TTV*10000)")
 
 def get_metric_data(bu_list, acquirer_list, month_list):
@@ -163,6 +169,10 @@ def get_metric_data(bu_list, acquirer_list, month_list):
     return df
 
 data = get_metric_data(bu_filter, acquirer_filter, month_filter)
+# Ensure no NaN in key columns for boolean indexing
+for col in ['ACQUIRER', 'Business Unit', 'Card Type', 'PAYMENT_METHOD']:
+    if col in data.columns:
+        data[col] = data[col].fillna('')
 
 # --- Wpay logic: construct split rows as in model_bu_2.py ---
 if not data.empty:
@@ -205,99 +215,9 @@ with col1:
 with col2:
     st.metric("Total Payment Methods", len(payment_method_order))
 with col3:
-    st.metric("Total COA (ex GST)", format_currency(data['COA_VALUE'].sum() / 1.1))
+    st.metric("Total COA", format_currency(data['COA_VALUE'].sum()))
 
-# Table logic: same as TTV, but use COA values
-rows = []
-grand_total = 0
-other_card_types = ['Dom.DR', 'Dom.CR', 'Prem.DR', 'Prem.CR', 'Int.DR', 'Int.CR']
-other_weights = [25, 18.5, 10, 9.52, 3, 0.5]
-sum_weights = sum(other_weights)
-for bu in data['Business Unit'].unique():
-    bu_data = data[data['Business Unit'] == bu]
-    row = {'Business Unit': bu}
-    total_coa = 0
-    total_ttv = 0
-    card_type_values = {}
-    # --- Wpay split logic ---
-    wpay_data = bu_data[bu_data['ACQUIRER'].str.contains('wpay', case=False)]
-    wpay_total = wpay_data['COA_VALUE'].sum()
-    wpay_total_ttv = wpay_data['TTV_VALUE'].sum() if 'TTV_VALUE' in wpay_data.columns else 0
-    wpay_amex = wpay_data[wpay_data['PAYMENT_METHOD'] == 'AMEX']['COA_VALUE'].sum() if 'PAYMENT_METHOD' in wpay_data.columns else 0
-    wpay_amex_ttv = wpay_data[wpay_data['PAYMENT_METHOD'] == 'AMEX']['TTV_VALUE'].sum() if 'PAYMENT_METHOD' in wpay_data.columns and 'TTV_VALUE' in wpay_data.columns else 0
-    wpay_eftpos = wpay_data[wpay_data['PAYMENT_METHOD'] == 'EFTPOS']['COA_VALUE'].sum() if 'PAYMENT_METHOD' in wpay_data.columns else 0
-    wpay_eftpos_ttv = wpay_data[wpay_data['PAYMENT_METHOD'] == 'EFTPOS']['TTV_VALUE'].sum() if 'PAYMENT_METHOD' in wpay_data.columns and 'TTV_VALUE' in wpay_data.columns else 0
-    wpay_rest = wpay_total - wpay_amex - wpay_eftpos
-    wpay_rest_ttv = wpay_total_ttv - wpay_amex_ttv - wpay_eftpos_ttv
-    wpay_split = {ct: 0 for ct in payment_method_order}
-    wpay_split_ttv = {ct: 0 for ct in payment_method_order}
-    wpay_split['AMEX'] = wpay_amex
-    wpay_split['EFTPOS'] = wpay_eftpos
-    wpay_split_ttv['AMEX'] = wpay_amex_ttv
-    wpay_split_ttv['EFTPOS'] = wpay_eftpos_ttv
-    for ct, w in zip(other_card_types, other_weights):
-        wpay_split[ct] = wpay_rest * (w / sum_weights) if wpay_rest > 0 else 0
-        wpay_split_ttv[ct] = wpay_rest_ttv * (w / sum_weights) if wpay_rest_ttv > 0 else 0
-    # --- Sum all acquirers ---
-    for card_type in payment_method_order:
-        adyen_managed = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['COA_VALUE'].sum()
-        adyen_managed_ttv = bu_data[(bu_data['ACQUIRER'] == 'adyen_managed') & (bu_data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in bu_data.columns else 0
-        adyen_balance = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['COA_VALUE'].sum()
-        adyen_balance_ttv = bu_data[(bu_data['ACQUIRER'] == 'adyen_balance') & (bu_data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in bu_data.columns else 0
-        wpay_value = wpay_split[card_type]
-        wpay_value_ttv = wpay_split_ttv[card_type]
-        coa_value = adyen_managed + adyen_balance + wpay_value
-        ttv_value = adyen_managed_ttv + adyen_balance_ttv + wpay_value_ttv
-        if show_bips and ttv_value > 0:
-            value = ((coa_value) / ttv_value) * 10000
-        else:
-            value = coa_value
-        card_type_values[card_type] = value
-        total_coa += coa_value
-        total_ttv += ttv_value
-    if show_bips and total_ttv > 0:
-        row['Total'] = ((total_coa) / total_ttv) * 10000
-    else:
-        row['Total'] = total_coa
-    row.update(card_type_values)
-    grand_total += row['Total']
-    rows.append(row)
-
-total_row = {'Business Unit': 'Total'}
-total_sum = 0
-for card_type in payment_method_order:
-    if acquirer_filter == ["Wpay"]:
-        pct = next((pct for ct, pct in wpay_card_types if ct == card_type), 0)
-        coa = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['COA_VALUE'].sum() * pct
-        ttv = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['TTV_VALUE'].sum() * pct if 'TTV_VALUE' in data.columns else 0
-    elif acquirer_filter == ["Adyen Managed"]:
-        coa = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['COA_VALUE'].sum()
-        ttv = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in data.columns else 0
-    elif acquirer_filter == ["Adyen Balance"]:
-        coa = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['COA_VALUE'].sum()
-        ttv = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in data.columns else 0
-    else:
-        adyen_managed_coa = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['COA_VALUE'].sum()
-        adyen_managed_ttv = data[(data['ACQUIRER'] == 'adyen_managed') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in data.columns else 0
-        adyen_balance_coa = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['COA_VALUE'].sum()
-        adyen_balance_ttv = data[(data['ACQUIRER'] == 'adyen_balance') & (data['Card Type'] == card_type)]['TTV_VALUE'].sum() if 'TTV_VALUE' in data.columns else 0
-        wpay_total_coa = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['COA_VALUE'].sum()
-        wpay_total_ttv = data[data['PAYMENT_METHOD'].str.contains('wpay', case=False)]['TTV_VALUE'].sum() if 'TTV_VALUE' in data.columns else 0
-        wpay_pct = next((pct for ct, pct in wpay_card_types if ct == card_type), 0)
-        wpay_coa = wpay_total_coa * wpay_pct
-        wpay_ttv = wpay_total_ttv * wpay_pct
-        coa = adyen_managed_coa + adyen_balance_coa + wpay_coa
-        ttv = adyen_managed_ttv + adyen_balance_ttv + wpay_ttv
-    if show_bips and ttv > 0:
-        value = ((coa) / ttv) * 10000
-    else:
-        value = coa
-    total_row[card_type] = value
-    total_sum += value
-total_row['Total'] = total_sum
-rows.append(total_row)
-
-# 1. Build value_rows_dollar from the original calculation (before any BIPS logic)
+# Build value_rows_dollar: for each BU, store ACQUIRER_FEE and TTV for each card type
 value_rows_dollar = []
 for bu in data['Business Unit'].unique():
     bu_data = data[data['Business Unit'] == bu]
@@ -314,79 +234,35 @@ for bu in data['Business Unit'].unique():
         total_ttv += ttv
     value_row['Total'] = total_coa
     ttv_row['Total'] = total_ttv
-    value_row['TTV'] = ttv_row  # Store TTVs for BIPS calculation
+    value_row['TTV'] = ttv_row
     value_rows_dollar.append(value_row)
 
-# 2. Build percent_rows and percent_of_total_col from value_rows_dollar
-percent_rows = []
-percent_of_total_col = {}
 total_coa_sum = sum(row['Total'] for row in value_rows_dollar)
-for value_row in value_rows_dollar:
-    pct_row = {'Business Unit': '% of COA'}
-    for card_type in payment_method_order:
-        pct = (value_row[card_type] / value_row['Total'] * 100) if value_row['Total'] > 0 else 0
-        pct_row[card_type] = f"{pct:.2f}%"
-    pct_row['Total'] = "100.00%"
-    percent_rows.append(pct_row)
-    percent_of_total_col[value_row['Business Unit']] = f"{(value_row['Total'] / total_coa_sum * 100):.2f}%" if total_coa_sum > 0 else "0.00%"
 
-# 3. Build the final_rows for display
+def format_bips(n):
+    return f"{n:.2f}" if pd.notna(n) else "0.00"
+
+# Build final_rows for display
 final_rows = []
-for i, value_row in enumerate(value_rows_dollar):
-    # Value row (dollar or BIPS)
+for value_row in value_rows_dollar:
     display_row = {'Business Unit': value_row['Business Unit']}
     for card_type in payment_method_order:
         if show_bips:
             ttv = value_row['TTV'][card_type]
             coa = value_row[card_type]
             bips = (coa / ttv * 10000) if ttv > 0 else 0
-            display_row[card_type] = f"{bips:.2f}"
+            display_row[card_type] = format_bips(bips)
         else:
             display_row[card_type] = format_currency(value_row[card_type])
     if show_bips:
         ttv_total = value_row['TTV']['Total']
         coa_total = value_row['Total']
         bips_total = (coa_total / ttv_total * 10000) if ttv_total > 0 else 0
-        display_row['Total'] = f"{bips_total:.2f}"
+        display_row['Total'] = format_bips(bips_total)
     else:
         display_row['Total'] = format_currency(value_row['Total'])
-    display_row['% Of Total'] = percent_of_total_col[value_row['Business Unit']]
+    display_row['% Of Total'] = f"{(value_row['Total'] / total_coa_sum * 100):.2f}%" if total_coa_sum > 0 else "0.00%"
     final_rows.append(display_row)
-    # Percent row (always from dollar values)
-    final_rows.append(percent_rows[i])
-
-# 4. Add the total and percent-of-total row, always from value_rows_dollar
-total_dollar_row = {'Business Unit': 'Total'}
-for card_type in payment_method_order:
-    total = sum(row[card_type] for row in value_rows_dollar)
-    ttv_total = sum(row['TTV'][card_type] for row in value_rows_dollar)
-    if show_bips:
-        bips = (total / ttv_total * 10000) if ttv_total > 0 else 0
-        total_dollar_row[card_type] = f"{bips:.2f}"
-    else:
-        total_dollar_row[card_type] = format_currency(total)
-if show_bips:
-    coa_grand_total = sum(row['Total'] for row in value_rows_dollar)
-    ttv_grand_total = sum(row['TTV']['Total'] for row in value_rows_dollar)
-    bips_grand_total = (coa_grand_total / ttv_grand_total * 10000) if ttv_grand_total > 0 else 0
-    total_dollar_row['Total'] = f"{bips_grand_total:.2f}"
-else:
-    total_dollar_row['Total'] = format_currency(sum(row['Total'] for row in value_rows_dollar))
-total_dollar_row['% Of Total'] = "100.00%"
-final_rows.append(total_dollar_row)
-
-# Percent of total row, always from value_rows_dollar
-total_pct_row = {'Business Unit': '% of Total'}
-grand_total = sum(row['Total'] for row in value_rows_dollar)
-for card_type in payment_method_order:
-    total = sum(row[card_type] for row in value_rows_dollar)
-    pct = (total / grand_total * 100) if grand_total > 0 else 0
-    total_pct_row[card_type] = f"{pct:.2f}%"
-total_pct_row['Total'] = "100.00%"
-total_pct_row['% Of Total'] = ""
-final_rows.append(total_pct_row)
-
-final_df = pd.DataFrame(final_rows)
 
 # Add custom CSS for smallest font and responsive compactness
 st.markdown("""
@@ -409,7 +285,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # Display the table using AgGrid (compact, content-width only)
-gb = GridOptionsBuilder.from_dataframe(final_df)
+gb = GridOptionsBuilder.from_dataframe(pd.DataFrame(final_rows))
 gb.configure_default_column(resizable=True, sorteable=False, filterable=False, groupable=False, width=60)
 gb.configure_column("Business Unit", pinned="left", width=90)
 for col in payment_method_order:
@@ -417,7 +293,7 @@ for col in payment_method_order:
 gb.configure_column("Total", width=60)
 gb.configure_column("% Of Total", width=60)
 AgGrid(
-    final_df,
+    pd.DataFrame(final_rows),
     gridOptions=gb.build(),
     theme="material",
     height=500,

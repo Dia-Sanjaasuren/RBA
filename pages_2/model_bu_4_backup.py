@@ -6,6 +6,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from config import SNOWFLAKE_CONFIG
 import numpy as np
 from st_aggrid.shared import JsCode
+import numbers
 
 # Define payment method order for all tables
 payment_method_order = [
@@ -284,12 +285,11 @@ def get_metric_data(bu_list, merchant_list, acquirer_list, month_list, account_m
     
     result_df.drop(columns=['bu_ttv_total', 'merchant_ttv_total'], inplace=True)
 
-    # Re-introduce adjustment rows
+    # Restore adjustment row logic: for each BU, add an Adjustment row as the negative sum of merchant rows
     final_rows = []
     metric_cols = ['TTV', 'MSF', 'COA', 'GP', 'SURCHARGE']
     for bu, group_df in result_df.groupby('Business Unit'):
         final_rows.extend(group_df.to_dict('records'))
-        
         individual_merchants_df = group_df[group_df['Merchant'] != 'All']
         if not individual_merchants_df.empty:
             adjustment_values = individual_merchants_df[metric_cols].sum()
@@ -343,83 +343,96 @@ def process_data(df):
     df['COA Bips (Assump)'] = df['COA Bips']
     df['GP ex gst (Assump)'] = df['GP ex gst']
     df['GP Bips (Assump)'] = df['GP Bips']
+    
+    # Convert numpy types to Python types for JSON serialization
+    df = convert_numpy_types(df)
+    
     return df
+
+def convert_numpy_types(df):
+    """
+    Convert numpy types to Python types to ensure JSON serialization compatibility with AgGrid.
+    """
+    df_copy = df.copy()
+    
+    # First pass: convert column dtypes
+    for col in df_copy.columns:
+        if df_copy[col].dtype in ['int64', 'int32', 'float64', 'float32']:
+            df_copy[col] = df_copy[col].astype(object)
+    
+    # Second pass: convert individual values
+    def safe_convert(x):
+        if pd.isna(x):
+            return None
+        elif isinstance(x, np.integer):
+            return int(x)
+        elif isinstance(x, np.floating):
+            return float(x)
+        elif isinstance(x, (int, float)):
+            return x
+        else:
+            return x
+    
+    # Apply conversion to all columns
+    for col in df_copy.columns:
+        df_copy[col] = df_copy[col].apply(safe_convert)
+    
+    # Final check: ensure no numpy types remain
+    def final_check(obj):
+        if isinstance(obj, (np.integer, np.floating, np.ndarray)):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, np.integer):
+                return int(obj)
+            elif isinstance(obj, np.floating):
+                return float(obj)
+        return obj
+    
+    # Apply final check to all values
+    for col in df_copy.columns:
+        df_copy[col] = df_copy[col].apply(final_check)
+    
+    return df_copy
 
 def recalculate_data(df):
     """
-    Recalculates all assumption values using a robust vectorized approach.
-    This honors the user's specified calculation hierarchy and avoids grouping/indexing errors.
-    Only the card types within the same (Business Unit, Merchant) group as the edited row are affected by % changes.
-    After recalculation, update the percent of total TTV (Assump) for each Business Unit (Merchant == 'All').
+    When % of Parent Total (Assump) is changed for a card type, only that row's TTV (Assump) is updated using the new % and the correct group TTV (Base):
+    - If 'All' row: use BU total TTV (Base)
+    - If merchant row: use merchant total TTV (Base)
+    All other rows and columns remain unchanged.
     """
     df_copy = df.copy()
 
     # Ensure correct data types to prevent calculation errors
     numeric_cols = [
-        'TTV', 'TTV (Assump)', 'TTV (Base)', '% of Parent Total (Assump)',
-        'MSF ex gst', 'MSF Bips', 'MSF ex gst (Assump)', 'MSF Bips (Assump)',
-        'COA ex gst', 'COA Bips', 'COA ex gst (Assump)', 'COA Bips (Assump)',
-        'GP ex gst', 'GP Bips', 'GP ex gst (Assump)', 'GP Bips (Assump)'
+        'TTV', 'TTV (Assump)', 'TTV (Base)', '% of Parent Total (Assump)'
     ]
     for col in numeric_cols:
         if col in df_copy.columns:
             df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(0)
 
-    # Step 1: Calculate base TTV for each (Business Unit, Merchant) pair using TTV (Base)
-    card_type_rows = df_copy[df_copy['Card Type'].isin(payment_method_order)]
-    bu_merchant_ttv_map = card_type_rows.groupby(['Business Unit', 'Merchant'])['TTV (Base)'].sum()
-    df_copy['base_ttv_for_assump'] = df_copy.set_index(['Business Unit', 'Merchant']).index.map(bu_merchant_ttv_map)
-
-    # Step 2: Identify ONLY the card type rows to perform calculations on.
+    # Only update the edited row's TTV (Assump) based on new %
     mask = df_copy['Card Type'].isin(payment_method_order)
+    diff = (df_copy['% of Parent Total (Assump)'] - df_copy['% of Parent Total']).abs()
+    edited_rows = df_copy[mask & (diff > 1e-6)]
+    for idx, row in edited_rows.iterrows():
+        if row['Merchant'] == 'All':
+            base_ttv = df_copy[(df_copy['Business Unit'] == row['Business Unit']) & (df_copy['Merchant'] == 'All')]['TTV (Base)'].sum()
+        else:
+            base_ttv = df_copy[(df_copy['Business Unit'] == row['Business Unit']) & (df_copy['Merchant'] == row['Merchant'])]['TTV (Base)'].sum()
+        new_pct = row['% of Parent Total (Assump)']
+        old_ttv_assump = row['TTV (Assump)']
+        new_ttv_assump = new_pct / 100.0 * base_ttv
+        df_copy.at[idx, 'TTV (Assump)'] = new_ttv_assump
 
-    # Step 3: For each (Business Unit, Merchant) group, recalculate only within that group
-    for (bu, merchant), group in df_copy[mask].groupby(['Business Unit', 'Merchant']):
-        group_mask = (df_copy['Business Unit'] == bu) & (df_copy['Merchant'] == merchant) & mask
-        base_ttv = bu_merchant_ttv_map.get((bu, merchant), 0)
-        if base_ttv > 0:
-            df_copy.loc[group_mask, 'TTV (Assump)'] = (
-                df_copy.loc[group_mask, '% of Parent Total (Assump)'] / 100
-            ) * base_ttv
-
-    # b. Recalculate MSF/COA (Assump) from BASE TTV and their Bips
-    df_copy.loc[mask, 'MSF ex gst (Assump)'] = \
-        df_copy.loc[mask, 'TTV (Assump)'] * df_copy.loc[mask, 'MSF Bips (Assump)'] / 10000
-    df_copy.loc[mask, 'COA ex gst (Assump)'] = \
-        df_copy.loc[mask, 'TTV (Assump)'] * df_copy.loc[mask, 'COA Bips (Assump)'] / 10000
-
-    # c. Recalculate GP (Assump)
-    df_copy.loc[mask, 'GP ex gst (Assump)'] = \
-        df_copy.loc[mask, 'MSF ex gst (Assump)'] - df_copy.loc[mask, 'COA ex gst (Assump)']
-    
-    # d. Recalculate GP Bips (Assump)
-    ttv_assump = df_copy.loc[mask, 'TTV (Assump)']
-    gp_assump = df_copy.loc[mask, 'GP ex gst (Assump)']
-    df_copy.loc[mask, 'GP Bips (Assump)'] = \
-        np.where(ttv_assump > 0, (gp_assump / ttv_assump) * 10000, 0)
-
-    # Step 4: After all TTV (Assump) are updated, recalculate BU % of Total (Assump)
-    # Only for Merchant == 'All'
-    bu_ttv_assump = df_copy[(df_copy['Merchant'] == 'All')].groupby('Business Unit')['TTV (Assump)'].sum()
-    total_ttv_assump = bu_ttv_assump.sum()
-    for bu in df_copy['Business Unit'].unique():
-        bu_mask = (df_copy['Business Unit'] == bu) & (df_copy['Merchant'] == 'All')
-        bu_ttv = bu_ttv_assump.get(bu, 0)
-        percent = (bu_ttv / total_ttv_assump * 100) if total_ttv_assump else 0
-        df_copy.loc[bu_mask, 'BU % of Total (Assump)'] = percent
-
-    # Step 5: Clean up.
-    df_copy = df_copy.drop(columns=['base_ttv_for_assump'])
-    # Only fill numeric columns to avoid Categorical errors
-    numeric_cols_cleanup = [
-        'TTV', 'TTV (Assump)', 'TTV (Base)', '% of Parent Total (Assump)',
-        'MSF ex gst', 'MSF Bips', 'MSF ex gst (Assump)', 'MSF Bips (Assump)',
-        'COA ex gst', 'COA Bips', 'COA ex gst (Assump)', 'COA Bips (Assump)',
-        'GP ex gst', 'GP Bips', 'GP ex gst (Assump)', 'GP Bips (Assump)'
-    ]
-    for col in numeric_cols_cleanup:
+    # Clean up
+    for col in ['TTV', 'TTV (Assump)', 'TTV (Base)', '% of Parent Total (Assump)']:
         if col in df_copy.columns:
             df_copy[col] = df_copy[col].fillna(0)
+    
+    # Convert numpy types to Python types for JSON serialization
+    df_copy = convert_numpy_types(df_copy)
+    
     return df_copy
 
 def apply_surcharge_ban(df):
@@ -466,6 +479,9 @@ def apply_surcharge_ban(df):
     for col in numeric_cols:
         if col in df_copy.columns:
             df_copy[col] = df_copy[col].fillna(0)
+    
+    # Convert numpy types to Python types for JSON serialization
+    df_copy = convert_numpy_types(df_copy)
     
     return df_copy
 
@@ -515,6 +531,10 @@ def apply_no_surcharge_increase_credit(df):
     for col in numeric_cols:
         if col in df_copy.columns:
             df_copy[col] = df_copy[col].fillna(0)
+    
+    # Convert numpy types to Python types for JSON serialization
+    df_copy = convert_numpy_types(df_copy)
+    
     return df_copy
 
 # --- New function for Reduce COA on Credit Card ---
@@ -562,6 +582,10 @@ def apply_reduce_coa_credit(df):
     for col in numeric_cols:
         if col in df_copy.columns:
             df_copy[col] = df_copy[col].fillna(0)
+    
+    # Convert numpy types to Python types for JSON serialization
+    df_copy = convert_numpy_types(df_copy)
+    
     return df_copy
 
 # --- Main data loading and caching ---
@@ -589,7 +613,8 @@ df_for_grid = st.session_state.edited_data[grid_key_base]
 
 # Filter out adjustment rows before displaying or exporting
 if 'Merchant' in df_for_grid.columns:
-    df_for_grid = df_for_grid[df_for_grid['Merchant'] != '__ADJUSTMENT__']
+    # df_for_grid = df_for_grid[df_for_grid['Merchant'] != '__ADJUSTMENT__']
+    pass
 
 st.markdown("<h5>Interactive Buttons</h5>", unsafe_allow_html=True)
 
@@ -598,11 +623,11 @@ col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 3])
 with col1:
     update_button = st.button("Update Model Table", type="primary", help="Apply assumption changes to the model table")
 with col2:
-    surcharge_ban_button = st.button("Surcharge Ban on Debit Card", type="primary", help="Set MSF Bips for Debit cards to 65")
+    surcharge_ban_button = st.button("Scenario 1", type="primary", help="Set MSF Bips for Debit cards to 65")
 with col3:
-    no_surcharge_credit_button = st.button("Increase Credit Card Surcharge", type="primary", help="Set Debit Bips to 65 and increase Credit Surcharge Bips as specified")
+    no_surcharge_credit_button = st.button("Scenario 2", type="primary", help="Set Debit Bips to 65 and increase Credit Surcharge Bips as specified")
 with col4:
-    reduce_coa_credit_button = st.button("Reduce COA on Credit Card", type="primary", help="Reduce COA Bips on credit cards as per business rule")
+    reduce_coa_credit_button = st.button("Scenario 3", type="primary", help="Reduce COA Bips on credit cards as per business rule")
 
 # --- Display Grid ---
 total_row_data = None
@@ -629,6 +654,38 @@ if not df_for_grid.empty:
     total_row['% of TTV (Assump)'] = 100.0
     total_row['Card Type'] = 'TOTAL'
     total_row_data = [total_row]
+
+# Final check: ensure df_for_grid has no numpy types before rendering AgGrid
+df_for_grid = convert_numpy_types(df_for_grid)
+
+# Always reset index and applymap to ensure all values are Python types
+def force_python_types(val):
+    if pd.isna(val):
+        return None
+    if isinstance(val, (np.integer, int)):
+        return int(val)
+    if isinstance(val, (np.floating, float)):
+        return float(val)
+    return val
+
+# Reset index and convert all values
+# (this replaces the previous conversion block before AgGrid)
+df_for_grid = df_for_grid.reset_index(drop=True)
+df_for_grid = df_for_grid.astype(object).applymap(force_python_types)
+
+# Also ensure columns are str (sometimes pandas can have numpy types as column names)
+df_for_grid.columns = [str(col) for col in df_for_grid.columns]
+
+# If the DataFrame is empty, show an empty table
+if df_for_grid.empty:
+    st.info("No data available for the selected merchant(s). Showing empty table.")
+    AgGrid(pd.DataFrame(columns=df_for_grid.columns))
+    st.stop()
+
+# If only one row, try to force a second dummy row (diagnostic)
+if len(df_for_grid) == 1:
+    dummy = {col: None for col in df_for_grid.columns}
+    df_for_grid = pd.concat([df_for_grid, pd.DataFrame([dummy])], ignore_index=True)
 
 assump_cell_style_right = JsCode("""
     function(params) {
@@ -840,31 +897,16 @@ grid_options = {
     "onFirstDataRendered": restore_expanded_js,
 }
 
-grid_response = AgGrid(
-    df_for_grid,
-    gridOptions=grid_options,
-    enable_enterprise_modules=True,
-    update_mode='MODEL_CHANGED',
-    theme='material',
-    height=600,
-    allow_unsafe_jscode=True,
-    key=grid_key_with_counter,
-    custom_js=get_expanded_js
-)
-
 # Store expanded keys in session state
 if 'expanded_keys' not in st.session_state:
     st.session_state['expanded_keys'] = []
-if 'custom' in grid_response and 'expanded' in grid_response['custom']:
-    st.session_state['expanded_keys'] = grid_response['custom']['expanded']
 
 # The data from the grid is the most up-to-date source
-df_from_grid = pd.DataFrame(grid_response['data']) if grid_response['data'] is not None else processed_data.copy()
+df_from_grid = processed_data.copy()
 
 if update_button:
     # Recalculate and store the data against the base key.
     st.session_state.edited_data[grid_key_base] = recalculate_data(df_from_grid)
-    # Increment the counter to force AgGrid to re-render from scratch on the next run.
     st.session_state.update_counter += 1
     st.rerun()
 
@@ -960,3 +1002,186 @@ with top_cols[1]:
         key="download-csv-btn",
         help="Download the current model table (All and Merchant level, with card types) as CSV."
     )
+
+grid_response = AgGrid(
+    df_for_grid,
+    gridOptions=grid_options,
+    enable_enterprise_modules=True,
+    update_mode='MODEL_CHANGED',
+    theme='material',
+    height=600,
+    allow_unsafe_jscode=True,
+    key=grid_key_with_counter,
+    custom_js=get_expanded_js
+)
+
+# Now that grid_response is defined, we can access it
+if 'custom' in grid_response and 'expanded' in grid_response['custom']:
+    st.session_state['expanded_keys'] = grid_response['custom']['expanded']
+
+# The data from the grid is the most up-to-date source
+df_from_grid = pd.DataFrame(grid_response['data']) if grid_response['data'] is not None else processed_data.copy()
+
+# --- Scenario Table with Default and 10 Scenarios ---
+
+# Helper: get the current total row as a dict (or None)
+def get_current_total_row():
+    if total_row_data and len(total_row_data) > 0:
+        return total_row_data[0].copy()
+    return None
+
+# Always initialize a scenario table in session state: first row is Default, next 10 are Scenario 1-10
+scenario_labels = ['Default'] + [f'Scenario {i+1}' for i in range(10)]
+key_cols = [
+    'Description',
+    'TTV', '% of TTV', 'TTV (Assump)', '% of TTV (Assump)',
+    'MSF ex gst', 'MSF Bips', 'MSF ex gst (Assump)', 'MSF Bips (Assump)',
+    'COA ex gst', 'COA Bips', 'COA ex gst (Assump)', 'COA Bips (Assump)',
+    'GP ex gst', 'GP Bips', 'GP ex gst (Assump)', 'GP Bips (Assump)'
+]
+
+# Helper: format a row for display
+currency_cols = ['TTV', 'TTV (Assump)', 'MSF ex gst', 'MSF ex gst (Assump)',
+                 'COA ex gst', 'COA ex gst (Assump)', 'GP ex gst', 'GP ex gst (Assump)']
+percent_cols = ['% of TTV', '% of TTV (Assump)']
+bips_cols = ['MSF Bips', 'MSF Bips (Assump)', 'COA Bips', 'COA Bips (Assump)', 'GP Bips', 'GP Bips (Assump)']
+def format_row(row, label):
+    formatted = {col: '' for col in key_cols}
+    for col in currency_cols:
+        if col in row:
+            try:
+                formatted[col] = f"${row[col]:,.0f}" if pd.notnull(row[col]) else ''
+            except Exception:
+                formatted[col] = row[col]
+    for col in percent_cols:
+        if col in row:
+            try:
+                formatted[col] = f"{row[col]:.2f}%" if pd.notnull(row[col]) else ''
+            except Exception:
+                formatted[col] = row[col]
+    for col in bips_cols:
+        if col in row:
+            try:
+                formatted[col] = f"{row[col]:.2f}" if pd.notnull(row[col]) else ''
+            except Exception:
+                formatted[col] = row[col]
+    formatted['Description'] = label
+    return formatted
+
+# Store the original default row in session state ONLY ONCE (on first load or after reset)
+if 'scenario_default_row' not in st.session_state:
+    base_row = get_current_total_row()
+    if base_row:
+        st.session_state['scenario_default_row'] = format_row(base_row, 'Default')
+    else:
+        st.session_state['scenario_default_row'] = {col: '' for col in key_cols}
+        st.session_state['scenario_default_row']['Description'] = 'Default'
+
+# Always initialize the scenario table rows if not present or wrong length
+if 'scenario_table_rows' not in st.session_state or len(st.session_state['scenario_table_rows']) != len(scenario_labels):
+    st.session_state['scenario_table_rows'] = []
+    st.session_state['scenario_table_rows'].append(st.session_state['scenario_default_row'].copy())
+    for label in scenario_labels[1:]:
+        row = {col: '' for col in key_cols}
+        row['Description'] = label
+        st.session_state['scenario_table_rows'].append(row)
+else:
+    # Always keep Default row as the original (never update after first set)
+    st.session_state['scenario_table_rows'][0] = st.session_state['scenario_default_row'].copy()
+
+# --- Two-Step Scenario Management ---
+# Step 1: Scenario buttons update main table (existing logic)
+# Step 2: Confirm Scenario button saves current totals to selected scenario
+
+# Initialize scenario selection in session state
+if 'selected_scenario_to_save' not in st.session_state:
+    st.session_state['selected_scenario_to_save'] = 1  # Default to Scenario 1
+
+# Scenario selection and confirm button
+st.markdown('---')
+st.markdown('<h4 style="color:#5D3A9B;">Save Current Totals to Scenario</h4>', unsafe_allow_html=True)
+col1, col2, col3 = st.columns([2, 2, 2])
+
+with col1:
+    scenario_to_save = st.selectbox(
+        "Select Scenario to Save To:",
+        options=[(i, f"Scenario {i}") for i in range(1, 11)],
+        format_func=lambda x: x[1],
+        index=st.session_state['selected_scenario_to_save'] - 1,
+        key="scenario_selector"
+    )
+    st.session_state['selected_scenario_to_save'] = scenario_to_save[0]
+
+with col2:
+    confirm_scenario_button = st.button(
+        f"Save to Scenario {scenario_to_save[0]}",
+        help=f"Save the current totals to Scenario {scenario_to_save[0]}",
+        key="confirm_scenario_btn"
+    )
+
+with col3:
+    # Show current scenario status
+    current_scenario_data = st.session_state['scenario_table_rows'][scenario_to_save[0]]
+    has_data = any(str(current_scenario_data.get(col, '')).strip() for col in currency_cols + percent_cols + bips_cols if col != 'Description')
+    status_text = "✅ Has Data" if has_data else "❌ Empty"
+    st.markdown(f"**Status:** {status_text}")
+
+# Handle confirm scenario button
+if confirm_scenario_button:
+    current_total = get_current_total_row()
+    if current_total:
+        st.session_state['scenario_table_rows'][scenario_to_save[0]] = format_row(current_total, f"Scenario {scenario_to_save[0]}")
+        st.success(f"✅ Saved current totals to Scenario {scenario_to_save[0]}")
+        st.rerun()
+
+# Reset scenario table
+if st.button('Reset Scenario Table'):
+    base_row = get_current_total_row()
+    if base_row:
+        st.session_state['scenario_default_row'] = format_row(base_row, 'Default')
+    else:
+        st.session_state['scenario_default_row'] = {col: '' for col in key_cols}
+        st.session_state['scenario_default_row']['Description'] = 'Default'
+    st.session_state['scenario_table_rows'] = []
+    st.session_state['scenario_table_rows'].append(st.session_state['scenario_default_row'].copy())
+    for label in scenario_labels[1:]:
+        row = {col: '' for col in key_cols}
+        row['Description'] = label
+        st.session_state['scenario_table_rows'].append(row)
+
+# --- Display Scenario Table ---
+st.markdown('---')
+st.markdown('<h4 style="color:#5D3A9B;">Scenario Table</h4>', unsafe_allow_html=True)
+
+# Add instructions for the scenario table
+st.markdown('''
+<div style="background-color:#f8f9fa; border-radius:8px; padding:15px; margin-bottom:15px;">
+<h5 style="margin-top:0; color:#5D3A9B;">How to Use Scenarios:</h5>
+<ol style="font-size:14px; margin-bottom:0;">
+  <li><b>Apply a scenario</b> using the buttons above (Surcharge Ban, No Surcharge Increase Credit, etc.)</li>
+  <li><b>Review the changes</b> in the main table above</li>
+  <li><b>Select a scenario slot</b> (1-10) from the dropdown</li>
+  <li><b>Click "Save to Scenario X"</b> to store the current totals</li>
+  <li><b>Repeat</b> for different scenarios to compare results</li>
+</ol>
+</div>
+''', unsafe_allow_html=True)
+
+scenario_df = pd.DataFrame(st.session_state['scenario_table_rows'])
+scenario_df = scenario_df[[col for col in key_cols if col in scenario_df.columns]]
+
+# Highlight the currently selected scenario
+def highlight_selected_scenario(row):
+    if row['Description'] == f"Scenario {st.session_state['selected_scenario_to_save']}":
+        return ['background-color: #fff3cd; font-weight: bold'] * len(row)
+    return [''] * len(row)
+
+styled = scenario_df.style
+styled = styled.set_properties(**{'text-align': 'center'})
+styled = styled.set_table_styles([
+    {'selector': 'th', 'props': [('background-color', '#002b45'), ('color', 'white'), ('font-weight', 'bold'), ('text-align', 'center')]},
+    {'selector': 'td', 'props': [('font-size', '15px')]},
+])
+styled = styled.apply(lambda x: ['background-color: #f2f9ff' if i%2==0 else 'background-color: #e6f0fa' for i in range(len(x))], axis=1)
+styled = styled.apply(highlight_selected_scenario, axis=1)
+st.table(styled)

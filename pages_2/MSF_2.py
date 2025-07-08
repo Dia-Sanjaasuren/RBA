@@ -1,3 +1,9 @@
+import os
+# Disable OCSP checks to avoid certificate validation errors
+os.environ['SF_OCSP_RESPONSE_CACHE_DIR'] = ''
+os.environ['SF_OCSP_RESPONSE_CACHE_SERVER_ENABLED'] = 'false'
+os.environ['SF_OCSP_ACTIVATE_ENDPOINT'] = 'false'
+
 import streamlit as st
 import pandas as pd
 import snowflake.connector
