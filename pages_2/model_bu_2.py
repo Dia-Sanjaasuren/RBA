@@ -588,9 +588,135 @@ def apply_reduce_coa_credit(df):
     
     return df_copy
 
+# --- New function for Scenario 4: Card Mix Changes ---
+def apply_card_mix_scenario(df):
+    """
+    Optimized: Applies card mix scenario by changing TTV assumption percentages and recalculating all assumption values.
+    Uses custom card type percentages for Scenario 4, applied per BU or merchant group, vectorized for speed.
+    """
+    df_copy = df.copy()
+    
+    # Ensure correct data types
+    numeric_cols = [
+        'TTV', 'TTV (Assump)', '% of Parent Total (Assump)',
+        'MSF ex gst', 'MSF Bips', 'MSF ex gst (Assump)', 'MSF Bips (Assump)',
+        'COA ex gst', 'COA Bips', 'COA ex gst (Assump)', 'COA Bips (Assump)',
+        'GP ex gst', 'GP Bips', 'GP ex gst (Assump)', 'GP Bips (Assump)'
+    ]
+    for col in numeric_cols:
+        if col in df_copy.columns:
+            df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(0)
+
+    # Card type percentages for Scenario 4
+    card_type_percentages = {
+        'AMEX': 0.05,      # 5%
+        'EFTPOS': 0.40,    # 40%
+        'Dom.DR': 0.25,    # 25%
+        'Dom.CR': 0.04,    # 4%
+        'Prem.DR': 0.07,   # 7%
+        'Prem.CR': 0.15,   # 15%
+        'Int.DR': 0.02,    # 2%
+        'Int.CR': 0.02     # 2%
+    }
+    
+    # Only apply to rows that are card types in payment_method_order
+    card_type_mask = df_copy['Card Type'].isin(payment_method_order)
+    df_types = df_copy[card_type_mask].copy()
+    
+    # Determine group columns
+    group_cols = []
+    if 'Business Unit' in df_copy.columns:
+        group_cols.append('Business Unit')
+    if 'Merchant' in df_copy.columns:
+        group_cols.append('Merchant')
+    
+    # Compute group total TTV for each row
+    df_types['Group_TTV'] = df_types.groupby(group_cols)['TTV'].transform('sum')
+    # Map card type percentages
+    df_types['CardTypePct'] = df_types['Card Type'].map(card_type_percentages).fillna(0)
+    # Calculate new TTV (Assump) and %
+    df_types['TTV (Assump)'] = df_types['CardTypePct'] * df_types['Group_TTV']
+    df_types['% of Parent Total (Assump)'] = df_types['CardTypePct'] * 100
+    # MSF/COA/GP assumption values
+    df_types['MSF ex gst (Assump)'] = df_types['TTV (Assump)'] * df_types['MSF Bips (Assump)'] / 10000
+    df_types['COA ex gst (Assump)'] = df_types['TTV (Assump)'] * df_types['COA Bips (Assump)'] / 10000
+    df_types['GP ex gst (Assump)'] = df_types['MSF ex gst (Assump)'] - df_types['COA ex gst (Assump)']
+    df_types['GP Bips (Assump)'] = np.where(
+        df_types['TTV (Assump)'] > 0,
+        (df_types['GP ex gst (Assump)'] / df_types['TTV (Assump)']) * 10000,
+        0
+    )
+    # Update the main DataFrame only for card type rows
+    for col in ['TTV (Assump)', '% of Parent Total (Assump)', 'MSF ex gst (Assump)', 'COA ex gst (Assump)', 'GP ex gst (Assump)', 'GP Bips (Assump)']:
+        df_copy.loc[df_types.index, col] = df_types[col]
+    # Clean up
+    for col in numeric_cols:
+        if col in df_copy.columns:
+            df_copy[col] = df_copy[col].fillna(0)
+    df_copy = convert_numpy_types(df_copy)
+    return df_copy
+
+# --- New function for Scenario 5: Churn (15% churn after Scenario 4) ---
+def apply_churn_scenario(df):
+    """
+    Applies Scenario 4 (card mix), then multiplies all Assump values for each Business Unit and 'All' merchant by 0.85 (15% churn), and recalculates Assump % and Bips.
+    """
+    # Step 1: Apply Scenario 4 (card mix)
+    df_churn = apply_card_mix_scenario(df.copy())
+    # Step 2: For each Business Unit and 'All' merchant, multiply all Assump values by 0.85
+    churn_factor = 0.85
+    # Only apply to rows that are card types in payment_method_order
+    card_type_mask = df_churn['Card Type'].isin(payment_method_order)
+    # For each group (Business Unit, Merchant), apply churn to 'All' merchant rows and group rows
+    group_cols = []
+    if 'Business Unit' in df_churn.columns:
+        group_cols.append('Business Unit')
+    if 'Merchant' in df_churn.columns:
+        group_cols.append('Merchant')
+    # Apply churn to all card type rows
+    churn_mask = card_type_mask
+    # Multiply all Assump values by churn_factor
+    for col in ['TTV (Assump)', 'MSF ex gst (Assump)', 'COA ex gst (Assump)', 'GP ex gst (Assump)']:
+        if col in df_churn.columns:
+            df_churn.loc[churn_mask, col] = df_churn.loc[churn_mask, col] * churn_factor
+    # Recalculate Assump % and Bips
+    # For each group, recalculate group total TTV (Assump)
+    df_churn['Group_TTV_Assump'] = df_churn.groupby(group_cols)['TTV (Assump)'].transform('sum')
+    df_churn['% of Parent Total (Assump)'] = np.where(
+        df_churn['Group_TTV_Assump'] > 0,
+        df_churn['TTV (Assump)'] / df_churn['Group_TTV_Assump'] * 100,
+        0
+    )
+    # Recalculate Bips
+    df_churn['MSF Bips (Assump)'] = np.where(
+        df_churn['TTV (Assump)'] > 0,
+        df_churn['MSF ex gst (Assump)'] / df_churn['TTV (Assump)'] * 10000,
+        0
+    )
+    df_churn['COA Bips (Assump)'] = np.where(
+        df_churn['TTV (Assump)'] > 0,
+        df_churn['COA ex gst (Assump)'] / df_churn['TTV (Assump)'] * 10000,
+        0
+    )
+    df_churn['GP Bips (Assump)'] = np.where(
+        df_churn['TTV (Assump)'] > 0,
+        df_churn['GP ex gst (Assump)'] / df_churn['TTV (Assump)'] * 10000,
+        0
+    )
+    # Clean up
+    for col in ['Group_TTV_Assump']:
+        if col in df_churn.columns:
+            df_churn.drop(columns=[col], inplace=True)
+    df_churn = convert_numpy_types(df_churn)
+    return df_churn
+
 # --- Main data loading and caching ---
 raw_data = get_metric_data(bu_filter, merchant_filter, acquirer_filter, month_filter, account_manager_filter)
 processed_data = process_data(raw_data)
+
+# After processed_data is defined, store the true base data in session state if not already present
+if 'base_processed_data' not in st.session_state:
+    st.session_state['base_processed_data'] = processed_data.copy()
 
 # --- State Management for Editable Grid ---
 # Initialize a counter for forcing grid updates. This is the key to the fix.
@@ -619,7 +745,7 @@ if 'Merchant' in df_for_grid.columns:
 st.markdown("<h5>Interactive Buttons</h5>", unsafe_allow_html=True)
 
 # --- Buttons above the table ---
-col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 3])
+col1, col2, col3, col4, col5, col6 = st.columns([1, 1, 1, 1, 1, 2])
 with col1:
     update_button = st.button("Update Model Table", type="primary", help="Apply assumption changes to the model table")
 with col2:
@@ -628,6 +754,16 @@ with col3:
     no_surcharge_credit_button = st.button("Scenario 2", type="primary", help="Set Debit Bips to 65 and increase Credit Surcharge Bips as specified")
 with col4:
     reduce_coa_credit_button = st.button("Scenario 3", type="primary", help="Reduce COA Bips on credit cards as per business rule")
+with col5:
+    card_mix_button = st.button("Scenario 4", type="primary", help="Apply custom card mix percentages (AMEX:5%, EFTPOS:40%, Dom.DR:25%, etc.) and recalculate assumption values")
+with col6:
+    churn_button = st.button("Scenario 5", type="primary", help="Apply Scenario 4 with 15% churn (multiply all Assump values by 85%)")
+
+# --- Scenario 5 button handler ---
+if churn_button:
+    st.session_state.edited_data[grid_key_base] = apply_churn_scenario(df_for_grid.copy())
+    st.session_state.update_counter += 1
+    st.rerun()
 
 # --- Display Grid ---
 total_row_data = None
@@ -911,20 +1047,22 @@ if update_button:
     st.rerun()
 
 if surcharge_ban_button:
-    # Use the data currently in the grid display for the calculation
-    df_surcharge = df_for_grid.copy()
-    df_surcharge = apply_surcharge_ban(df_surcharge)
-    st.session_state.edited_data[grid_key_base] = df_surcharge
+    st.session_state.edited_data[grid_key_base] = apply_surcharge_ban(df_for_grid.copy())
     st.session_state.update_counter += 1
     st.rerun()
 
 if no_surcharge_credit_button:
-    st.session_state.edited_data[grid_key_base] = apply_no_surcharge_increase_credit(df_for_grid)
+    st.session_state.edited_data[grid_key_base] = apply_no_surcharge_increase_credit(df_for_grid.copy())
     st.session_state.update_counter += 1
     st.rerun()
 
 if reduce_coa_credit_button:
-    st.session_state.edited_data[grid_key_base] = apply_reduce_coa_credit(df_for_grid)
+    st.session_state.edited_data[grid_key_base] = apply_reduce_coa_credit(df_for_grid.copy())
+    st.session_state.update_counter += 1
+    st.rerun()
+
+if card_mix_button:
+    st.session_state.edited_data[grid_key_base] = apply_card_mix_scenario(df_for_grid.copy())
     st.session_state.update_counter += 1
     st.rerun()
 
