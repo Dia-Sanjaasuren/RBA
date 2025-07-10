@@ -87,15 +87,35 @@ st.markdown('''
 <div style="background-color:#e3f2fd; border-radius:8px; padding:18px 18px 10px 18px; margin-bottom:18px;">
 <h4 style="margin-top:0;">Instruction on Model Table</h4>
 <ul style="font-size:16px;">
-  <li><b>Base values</b> and <span style="color:#1976d2;">assumption columns</span> are shown in the table below.</li>
-  <li><b>GP (base and assumption) is always calculated as MSF - COA (ex GST).</b></li>
-  <li><b>Blue background</b> = editable assumption columns. Click to adjust values.</li>
-  <li>Edit % values as needed, then click <b>Update Model Table</b> to apply your changes.</li>
-  <li>When you change TTV %, only TTV assumption values update. MSF and COA Bips remain unchanged and use baseline TTV data.</li>
-  <li>When you change MSF or COA Bips, GP updates automatically.</li>
+  <li><b>Blue background</b> = editable assumption columns. Edit values as needed, then click <b>Update Model Table</b> to apply your changes.</li>
+  <li><b>GP</b> is calculated as MSF - COA (ex GST).</li>
+  <li>When you change <b>TTV %</b>, only TTV assumption values update.</li>
+  <li>When you change <b>MSF or COA Bips</b>, GP updates automatically.</li>
 </ul>
 </div>
 ''', unsafe_allow_html=True)
+
+# Add this CSS block near the top of your file (after other style blocks)
+st.markdown("""
+    <style>
+    .stButton > button[data-testid="button-update-model-btn"] {
+        background-color: #1976d2 !important;  /* Blue */
+        color: white !important;
+        border: none !important;
+        border-radius: 8px !important;
+        padding: 0.6em 1.2em !important;
+        font-size: 15px !important;
+        font-weight: 600 !important;
+        transition: background-color 0.2s, color 0.2s !important;
+        box-shadow: none !important;
+        margin-right: 2em !important;
+    }
+    .stButton > button[data-testid="button-update-model-btn"]:hover {
+        background-color: #1251a3 !important;
+        color: white !important;
+    }
+    </style>
+""", unsafe_allow_html=True)
 
 # Acquirer display mapping (if needed)
 acquirer_display_map = {
@@ -539,6 +559,9 @@ def apply_no_surcharge_increase_credit(df):
 
 # --- New function for Reduce COA on Credit Card ---
 def apply_reduce_coa_credit(df):
+    # Always apply Scenario 1 and Scenario 2 first
+    df = apply_surcharge_ban(df)
+    df = apply_no_surcharge_increase_credit(df)
     df_copy = df.copy()
     numeric_cols = [
         'TTV', 'TTV (Assump)', '% of Parent Total (Assump)',
@@ -582,20 +605,15 @@ def apply_reduce_coa_credit(df):
     for col in numeric_cols:
         if col in df_copy.columns:
             df_copy[col] = df_copy[col].fillna(0)
-    
     # Convert numpy types to Python types for JSON serialization
     df_copy = convert_numpy_types(df_copy)
-    
     return df_copy
 
 # --- New function for Scenario 4: Card Mix Changes ---
 def apply_card_mix_scenario(df):
-    """
-    Optimized: Applies card mix scenario by changing TTV assumption percentages and recalculating all assumption values.
-    Uses custom card type percentages for Scenario 4, applied per BU or merchant group, vectorized for speed.
-    """
+    # Always apply Scenario 3 (which includes Scenarios 1 and 2) first
+    df = apply_reduce_coa_credit(df)
     df_copy = df.copy()
-    
     # Ensure correct data types
     numeric_cols = [
         'TTV', 'TTV (Assump)', '% of Parent Total (Assump)',
@@ -618,18 +636,15 @@ def apply_card_mix_scenario(df):
         'Int.DR': 0.02,    # 2%
         'Int.CR': 0.02     # 2%
     }
-    
     # Only apply to rows that are card types in payment_method_order
     card_type_mask = df_copy['Card Type'].isin(payment_method_order)
     df_types = df_copy[card_type_mask].copy()
-    
     # Determine group columns
     group_cols = []
     if 'Business Unit' in df_copy.columns:
         group_cols.append('Business Unit')
     if 'Merchant' in df_copy.columns:
         group_cols.append('Merchant')
-    
     # Compute group total TTV for each row
     df_types['Group_TTV'] = df_types.groupby(group_cols)['TTV'].transform('sum')
     # Map card type percentages
@@ -658,57 +673,54 @@ def apply_card_mix_scenario(df):
 
 # --- New function for Scenario 5: Churn (15% churn after Scenario 4) ---
 def apply_churn_scenario(df):
-    """
-    Applies Scenario 4 (card mix), then multiplies all Assump values for each Business Unit and 'All' merchant by 0.85 (15% churn), and recalculates Assump % and Bips.
-    """
-    # Step 1: Apply Scenario 4 (card mix)
-    df_churn = apply_card_mix_scenario(df.copy())
+    # Always apply Scenario 4 (which includes all previous scenarios) first
+    df = apply_card_mix_scenario(df)
     # Step 2: For each Business Unit and 'All' merchant, multiply all Assump values by 0.85
     churn_factor = 0.85
     # Only apply to rows that are card types in payment_method_order
-    card_type_mask = df_churn['Card Type'].isin(payment_method_order)
+    card_type_mask = df['Card Type'].isin(payment_method_order)
     # For each group (Business Unit, Merchant), apply churn to 'All' merchant rows and group rows
     group_cols = []
-    if 'Business Unit' in df_churn.columns:
+    if 'Business Unit' in df.columns:
         group_cols.append('Business Unit')
-    if 'Merchant' in df_churn.columns:
+    if 'Merchant' in df.columns:
         group_cols.append('Merchant')
     # Apply churn to all card type rows
     churn_mask = card_type_mask
     # Multiply all Assump values by churn_factor
     for col in ['TTV (Assump)', 'MSF ex gst (Assump)', 'COA ex gst (Assump)', 'GP ex gst (Assump)']:
-        if col in df_churn.columns:
-            df_churn.loc[churn_mask, col] = df_churn.loc[churn_mask, col] * churn_factor
+        if col in df.columns:
+            df.loc[churn_mask, col] = df.loc[churn_mask, col] * churn_factor
     # Recalculate Assump % and Bips
     # For each group, recalculate group total TTV (Assump)
-    df_churn['Group_TTV_Assump'] = df_churn.groupby(group_cols)['TTV (Assump)'].transform('sum')
-    df_churn['% of Parent Total (Assump)'] = np.where(
-        df_churn['Group_TTV_Assump'] > 0,
-        df_churn['TTV (Assump)'] / df_churn['Group_TTV_Assump'] * 100,
+    df['Group_TTV_Assump'] = df.groupby(group_cols)['TTV (Assump)'].transform('sum')
+    df['% of Parent Total (Assump)'] = np.where(
+        df['Group_TTV_Assump'] > 0,
+        df['TTV (Assump)'] / df['Group_TTV_Assump'] * 100,
         0
     )
     # Recalculate Bips
-    df_churn['MSF Bips (Assump)'] = np.where(
-        df_churn['TTV (Assump)'] > 0,
-        df_churn['MSF ex gst (Assump)'] / df_churn['TTV (Assump)'] * 10000,
+    df['MSF Bips (Assump)'] = np.where(
+        df['TTV (Assump)'] > 0,
+        df['MSF ex gst (Assump)'] / df['TTV (Assump)'] * 10000,
         0
     )
-    df_churn['COA Bips (Assump)'] = np.where(
-        df_churn['TTV (Assump)'] > 0,
-        df_churn['COA ex gst (Assump)'] / df_churn['TTV (Assump)'] * 10000,
+    df['COA Bips (Assump)'] = np.where(
+        df['TTV (Assump)'] > 0,
+        df['COA ex gst (Assump)'] / df['TTV (Assump)'] * 10000,
         0
     )
-    df_churn['GP Bips (Assump)'] = np.where(
-        df_churn['TTV (Assump)'] > 0,
-        df_churn['GP ex gst (Assump)'] / df_churn['TTV (Assump)'] * 10000,
+    df['GP Bips (Assump)'] = np.where(
+        df['TTV (Assump)'] > 0,
+        df['GP ex gst (Assump)'] / df['TTV (Assump)'] * 10000,
         0
     )
     # Clean up
     for col in ['Group_TTV_Assump']:
-        if col in df_churn.columns:
-            df_churn.drop(columns=[col], inplace=True)
-    df_churn = convert_numpy_types(df_churn)
-    return df_churn
+        if col in df.columns:
+            df.drop(columns=[col], inplace=True)
+    df = convert_numpy_types(df)
+    return df
 
 # --- Main data loading and caching ---
 raw_data = get_metric_data(bu_filter, merchant_filter, acquirer_filter, month_filter, account_manager_filter)
@@ -717,6 +729,10 @@ processed_data = process_data(raw_data)
 # After processed_data is defined, store the true base data in session state if not already present
 if 'base_processed_data' not in st.session_state:
     st.session_state['base_processed_data'] = processed_data.copy()
+
+# After processed_data is defined, always initialize true_baseline in session state
+if 'true_baseline' not in st.session_state:
+    st.session_state['true_baseline'] = processed_data.copy()
 
 # --- State Management for Editable Grid ---
 # Initialize a counter for forcing grid updates. This is the key to the fix.
@@ -747,7 +763,7 @@ st.markdown("<h5>Interactive Buttons</h5>", unsafe_allow_html=True)
 # --- Buttons above the table ---
 col1, col2, col3, col4, col5, col6 = st.columns([1, 1, 1, 1, 1, 2])
 with col1:
-    update_button = st.button("Update Model Table", type="primary", help="Apply assumption changes to the model table")
+    update_button = st.button("Update Model Table", key="update-model-btn", help="Apply assumption changes to the model table")
 with col2:
     surcharge_ban_button = st.button("Scenario 1", type="primary", help="Set MSF Bips for Debit cards to 65")
 with col3:
@@ -982,7 +998,7 @@ grid_options = {
                 """)
             }
         ]},
-        {"headerName": "GP", "headerClass": "center-aligned-header", "children": [
+        {"headerName": "GP before Inc", "headerClass": "center-aligned-header", "children": [
             {"field": "GP ex gst", "headerName": "Base", "aggFunc": "sum", "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": {"textAlign": "right"}},
             {"headerName": "Bips", "valueFormatter": "x == null ? '' : Number(x).toFixed(2)", "valueGetter": JsCode("""
                 function(params) {
@@ -1129,6 +1145,13 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# Revert: Place Reset to Default above the table and Download as CSV on the right as before
+if st.button('Reset to Default', key='reset-default-main'):
+    st.session_state.edited_data[grid_key_base] = st.session_state['true_baseline'].copy()
+    st.session_state.update_counter += 1
+    st.rerun()
+
+# Download as CSV button on the right (as before)
 top_cols = st.columns([8, 1])
 with top_cols[1]:
     csv = df_for_grid.to_csv(index=False).encode('utf-8')
@@ -1235,12 +1258,27 @@ else:
 if 'selected_scenario_to_save' not in st.session_state:
     st.session_state['selected_scenario_to_save'] = 1  # Default to Scenario 1
 
-# Scenario selection and confirm button
+# --- Display Scenario Table ---
 st.markdown('---')
-st.markdown('<h4 style="color:#5D3A9B;">Save Current Totals to Scenario</h4>', unsafe_allow_html=True)
-col1, col2, col3 = st.columns([2, 2, 2])
 
-with col1:
+# Add instructions for the scenario table (already blue box)
+st.markdown('''
+<div style="background-color:#e3f2fd; border-radius:8px; padding:18px 18px 10px 18px; margin-bottom:18px;">
+<h4 style="margin-top:0; color:#5D3A9B;">How to Use Scenarios</h4>
+<ul style="font-size:16px;">
+  <li><b>Apply a scenario</b> using the buttons above (<b>Scenario 1</b>, <b>Scenario 2</b>, etc.)</li>
+  <li><b>Review the changes</b> in the main table above</li>
+  <li><b>Select a scenario slot</b> (1-10) from the dropdown</li>
+  <li>Click <b style='color:#1976d2;'>Save to Scenario X</b> to store the current totals</li>
+  <li><b>Repeat</b> for different scenarios to compare results</li>
+  <li>If necessary, click <b style='color:#1976d2;'>Reset Scenario Table</b> to erase results</li>
+</ul>
+</div>
+''', unsafe_allow_html=True)
+
+# --- Scenario selection and save row (dropdown and button at same level) ---
+row1_col1, row1_col2 = st.columns([1, 3])  # Make dropdown column smaller
+with row1_col1:
     scenario_to_save = st.selectbox(
         "Select Scenario to Save To:",
         options=[(i, f"Scenario {i}") for i in range(1, 11)],
@@ -1249,31 +1287,15 @@ with col1:
         key="scenario_selector"
     )
     st.session_state['selected_scenario_to_save'] = scenario_to_save[0]
-
-with col2:
+with row1_col2:
     confirm_scenario_button = st.button(
         f"Save to Scenario {scenario_to_save[0]}",
         help=f"Save the current totals to Scenario {scenario_to_save[0]}",
         key="confirm_scenario_btn"
     )
 
-with col3:
-    # Show current scenario status
-    current_scenario_data = st.session_state['scenario_table_rows'][scenario_to_save[0]]
-    has_data = any(str(current_scenario_data.get(col, '')).strip() for col in currency_cols + percent_cols + bips_cols if col != 'Description')
-    status_text = "✅ Has Data" if has_data else "❌ Empty"
-    st.markdown(f"**Status:** {status_text}")
-
-# Handle confirm scenario button
-if confirm_scenario_button:
-    current_total = get_current_total_row()
-    if current_total:
-        st.session_state['scenario_table_rows'][scenario_to_save[0]] = format_row(current_total, f"Scenario {scenario_to_save[0]}")
-        st.success(f"✅ Saved current totals to Scenario {scenario_to_save[0]}")
-        st.rerun()
-
-# Reset scenario table
-if st.button('Reset Scenario Table'):
+# --- Reset Scenario Table button below the row ---
+if st.button('Reset Scenario Table', key='reset-scenario-table'):
     base_row = get_current_total_row()
     if base_row:
         st.session_state['scenario_default_row'] = format_row(base_row, 'Default')
@@ -1287,28 +1309,20 @@ if st.button('Reset Scenario Table'):
         row['Description'] = label
         st.session_state['scenario_table_rows'].append(row)
 
-# --- Display Scenario Table ---
-st.markdown('---')
-st.markdown('<h4 style="color:#5D3A9B;">Scenario Table</h4>', unsafe_allow_html=True)
+# --- Save scenario logic ---
+if confirm_scenario_button:
+    current_total = get_current_total_row()
+    if current_total:
+        st.session_state['scenario_table_rows'][scenario_to_save[0]] = format_row(current_total, f"Scenario {scenario_to_save[0]}")
+        st.success(f"✅ Saved current totals to Scenario {scenario_to_save[0]}")
+        st.rerun()
 
-# Add instructions for the scenario table
-st.markdown('''
-<div style="background-color:#f8f9fa; border-radius:8px; padding:15px; margin-bottom:15px;">
-<h5 style="margin-top:0; color:#5D3A9B;">How to Use Scenarios:</h5>
-<ol style="font-size:14px; margin-bottom:0;">
-  <li><b>Apply a scenario</b> using the buttons above (Surcharge Ban, No Surcharge Increase Credit, etc.)</li>
-  <li><b>Review the changes</b> in the main table above</li>
-  <li><b>Select a scenario slot</b> (1-10) from the dropdown</li>
-  <li><b>Click "Save to Scenario X"</b> to store the current totals</li>
-  <li><b>Repeat</b> for different scenarios to compare results</li>
-</ol>
-</div>
-''', unsafe_allow_html=True)
+# --- Scenario Table header and display ---
+st.markdown('<h4 style="color:#5D3A9B;">Scenario Table</h4>', unsafe_allow_html=True)
 
 scenario_df = pd.DataFrame(st.session_state['scenario_table_rows'])
 scenario_df = scenario_df[[col for col in key_cols if col in scenario_df.columns]]
 
-# Highlight the currently selected scenario
 def highlight_selected_scenario(row):
     if row['Description'] == f"Scenario {st.session_state['selected_scenario_to_save']}":
         return ['background-color: #fff3cd; font-weight: bold'] * len(row)
@@ -1323,3 +1337,9 @@ styled = styled.set_table_styles([
 styled = styled.apply(lambda x: ['background-color: #f2f9ff' if i%2==0 else 'background-color: #e6f0fa' for i in range(len(x))], axis=1)
 styled = styled.apply(highlight_selected_scenario, axis=1)
 st.table(styled)
+
+# Add a Reset to Default button with the scenario buttons
+if st.button('Reset to Default', key='reset-default-scenario'):
+    st.session_state.edited_data[grid_key_base] = st.session_state['true_baseline'].copy()
+    st.session_state.update_counter += 1
+    st.rerun()

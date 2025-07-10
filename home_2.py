@@ -8,7 +8,7 @@ st.set_page_config(
     page_title="Oolio Group Dashboard",
     page_icon="",
     layout="wide",
-    initial_sidebar_state="collapsed"  # Better for mobile
+    initial_sidebar_state="expanded"  # Sidebar open by default
 )
 
 # Mobile-friendly CSS
@@ -94,31 +94,23 @@ pages = {
     # "MSF_2": "pages_2/MSF_2.py",  # Removed from app
     "COA ex GST": "pages_2/COA.py",
     "GP ex GST": "pages_2/GP.py",
-    "GP Summary": "pages_2/GP_summary.py",
+    # "GP Summary": "pages_2/GP_summary.py",
     # "Model Business Unit": "pages_2/model_business_unit.py",
     # "Model All": "pages_2/model_all.py",
     "Model Table": "pages_2/model_bu_2.py",
-    "Model Table V2": "pages_2/Model Table V2.py",
+    # "Model Table V2": "pages_2/Model Table V2.py",
     "Model Table BU4 (Backup)": "pages_2/model_bu_4_backup.py",
     # "Business Unit Model": "pages_2/model_bu_3.py"
 }
-page = st.sidebar.radio("Go to", ["Dashboard"] + list(pages.keys()), key="page")
+
+# Remove hidden pages from the radio button list
+display_pages = [k for k in pages.keys() if k not in ["GP Summary", "Model Table V2"]]
+page = st.sidebar.radio("Go to", ["Dashboard"] + display_pages, key="page")
 
 if page == "Dashboard":
-    st.title("Oolio Group Dashboard 2")
     st.markdown("""
-    Welcome to the new Oolio Group dashboard! Use the navigation links below to access the new pages:
-
-    - [TTV](?page=TTV)
-    - [MSF](?page=MSF)
-    - [COA](?page=COA)
-    - [GP](?page=GP)
-    - [GP Summary](?page=GP%20Summary)
-    - [Assumptions](?page=Assumptions)
-    - [Model Business Unit](?page=Model%20Business%20Unit)
-    - [Model All](?page=Model%20All)
-
-    ---
+    Welcome to the new Oolio Group dashboard!
+    
     This dashboard provides advanced analytics and modeling for Oolio Group's business units and card types. Use the sidebar to navigate between pages.
     """)
 else:

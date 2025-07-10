@@ -7,6 +7,7 @@ from config import SNOWFLAKE_CONFIG
 import numpy as np
 from st_aggrid.shared import JsCode
 import numbers
+import difflib
 
 # Define payment method order for all tables
 payment_method_order = [
@@ -214,7 +215,7 @@ def get_metric_data(bu_list, merchant_list, acquirer_list, month_list, account_m
         SUM(SURCHARGE) as SURCHARGE
     FROM base_data
     GROUP BY 1, 2, 3, 4, 5, 6, 7
-    ORDER BY "Business Unit", "Merchant", TRADING_MONTH, "Card Type"
+    ORDER BY "Business Unit", "Merchant", MERCHANT_ACCOUNT, TRADING_MONTH, "Card Type"
     """
     df = pd.read_sql(query, conn)
     
@@ -222,11 +223,14 @@ def get_metric_data(bu_list, merchant_list, acquirer_list, month_list, account_m
     if df.empty:
         return pd.DataFrame()
 
+    # --- After SQL, print columns for debug ---
+    print('AFTER SQL:', df.columns.tolist())
+
     # 1. Separate data by acquirer type for easier processing
     adyen_data = df[df['ACQUIRER'].isin(['adyen_managed', 'adyen_balance'])].copy()
     wpay_data = df[df['ACQUIRER'].str.contains('wpay', case=False, na=False)].copy()
 
-    # 2. Create the "All" merchant aggregate for Adyen data
+    # 2. Create the "All" merchant aggregate for Adyen data (no MERCHANT_ACCOUNT or TRADING_MONTH for 'All')
     adyen_agg = adyen_data.groupby(['Business Unit', 'Card Type']).agg(
         TTV=('TTV', 'sum'),
         MSF=('MSF', 'sum'),
@@ -234,35 +238,31 @@ def get_metric_data(bu_list, merchant_list, acquirer_list, month_list, account_m
         SURCHARGE=('SURCHARGE', 'sum')
     ).reset_index()
 
-    # 3. Process the complex WPay logic efficiently
+    # 3. Process the complex WPay logic efficiently (no MERCHANT_ACCOUNT or TRADING_MONTH for 'All')
     wpay_agg_rows = []
     for bu in wpay_data['Business Unit'].unique():
         bu_wpay_data = wpay_data[wpay_data['Business Unit'] == bu]
-        # Isolate key segments
         wpay_amex = bu_wpay_data[bu_wpay_data['PAYMENT_METHOD'] == 'AMEX'].sum(numeric_only=True)
         wpay_eftpos = bu_wpay_data[bu_wpay_data['PAYMENT_METHOD'] == 'EFTPOS'].sum(numeric_only=True)
         wpay_total = bu_wpay_data.sum(numeric_only=True)
         wpay_rest = wpay_total - wpay_amex - wpay_eftpos
-        # Append AMEX and EFTPOS rows
         if wpay_amex['TTV'] > 0: wpay_agg_rows.append({'Business Unit': bu, 'Card Type': 'AMEX', **wpay_amex})
         if wpay_eftpos['TTV'] > 0: wpay_agg_rows.append({'Business Unit': bu, 'Card Type': 'EFTPOS', **wpay_eftpos})
-        # Distribute the rest by predefined weights
-        other_card_types = {'Dom.DR': 0.25, 'Dom.CR': 0.185, 'Prem.DR': 0.0952, 'Prem.CR': 0.10, 'Int.DR': 0.005, 'Int.CR': 0.03}
-        total_weight = sum(other_card_types.values())
-        if wpay_rest['TTV'] > 0 and total_weight > 0:
-            for card, weight in other_card_types.items():
-                prorated_rest = (wpay_rest * (weight / total_weight))
-                wpay_agg_rows.append({'Business Unit': bu, 'Card Type': card, **prorated_rest})
     wpay_agg = pd.DataFrame(wpay_agg_rows)
+
     # 4. Combine Adyen and WPay aggregates to form the final "All" merchant data
     all_merchants_agg = pd.concat([adyen_agg, wpay_agg]).groupby(['Business Unit', 'Card Type']).sum().reset_index()
     all_merchants_agg['Merchant'] = 'All'
+    all_merchants_agg['MERCHANT_ACCOUNT'] = None  # Add this column for consistency
+    all_merchants_agg['TRADING_MONTH'] = None     # Add this column for consistency
+
     # 5. Get individual merchant data (ensure required columns exist)
     group_cols = ['Business Unit', 'Merchant', 'MERCHANT_ACCOUNT', 'TRADING_MONTH', 'Card Type']
     numeric_cols = ['TTV', 'MSF', 'COA', 'SURCHARGE']
     individual_merchants_grouped = (
         df.groupby(group_cols)[numeric_cols].sum().reset_index()
     )
+
     # 6. Combine "All" aggregate with grouped individual merchant data
     result_df = pd.concat([all_merchants_agg, individual_merchants_grouped], ignore_index=True)
 
@@ -271,43 +271,42 @@ def get_metric_data(bu_list, merchant_list, acquirer_list, month_list, account_m
     result_df['GP'] = result_df['MSF'] - result_df['COA']
 
     # --- Efficiently Calculate '% of TTV' at multiple levels ---
-    bu_total_ttv_map = result_df[result_df['Merchant'] == 'All'].groupby(['Business Unit', 'TRADING_MONTH'])['TTV'].sum()
-    merchant_total_ttv_map = result_df[result_df['Merchant'] != 'All'].groupby(['Business Unit', 'Merchant', 'MERCHANT_ACCOUNT', 'TRADING_MONTH'])['TTV'].sum()
+    bu_total_ttv_map = result_df[result_df['Merchant'] == 'All'].groupby('Business Unit')['TTV'].sum()
+    merchant_total_ttv_map = result_df[result_df['Merchant'] != 'All'].groupby(['Business Unit', 'Merchant', 'MERCHANT_ACCOUNT'])['TTV'].sum()
 
-    result_df['bu_ttv_total'] = result_df.set_index(['Business Unit', 'TRADING_MONTH']).index.map(bu_total_ttv_map)
-    
-    # Map merchant totals, creating a multi-index series and then mapping
-    merchant_map = result_df.set_index(['Business Unit', 'Merchant', 'MERCHANT_ACCOUNT', 'TRADING_MONTH']).index.map(merchant_total_ttv_map)
+    result_df['bu_ttv_total'] = result_df['Business Unit'].map(bu_total_ttv_map)
+    merchant_map = result_df.set_index(['Business Unit', 'Merchant', 'MERCHANT_ACCOUNT']).index.map(merchant_total_ttv_map)
     result_df['merchant_ttv_total'] = merchant_map
 
     result_df['% of TTV'] = np.nan
     mask_bu = (result_df['Merchant'] == 'All') & (result_df['bu_ttv_total'] > 0)
     result_df.loc[mask_bu, '% of TTV'] = (result_df['TTV'] / result_df['bu_ttv_total']) * 100
-    
     mask_merchant = (result_df['Merchant'] != 'All') & (result_df['merchant_ttv_total'] > 0)
     result_df.loc[mask_merchant, '% of TTV'] = (result_df['TTV'] / result_df['merchant_ttv_total']) * 100
-    
     result_df.drop(columns=['bu_ttv_total', 'merchant_ttv_total'], inplace=True)
 
     # Restore adjustment row logic: for each BU, add an Adjustment row as the negative sum of merchant rows
     final_rows = []
     metric_cols = ['TTV', 'MSF', 'COA', 'GP', 'SURCHARGE']
-    for (bu, trading_month), group_df in result_df.groupby(['Business Unit', 'TRADING_MONTH']):
+    for bu, group_df in result_df.groupby('Business Unit'):
         final_rows.extend(group_df.to_dict('records'))
-        individual_merchants_df = group_df[group_df['Merchant'] != 'All']
+        individual_merchants_df = group_df[(group_df['Merchant'] != 'All') & (group_df['MERCHANT_ACCOUNT'].notnull())]
         if not individual_merchants_df.empty:
             adjustment_values = individual_merchants_df[metric_cols].sum()
-            adjustment_row = {'Business Unit': bu, 'Merchant': '__ADJUSTMENT__', 'MERCHANT_ACCOUNT': None, 'TRADING_MONTH': trading_month}
+            adjustment_row = {'Business Unit': bu, 'Merchant': '__ADJUSTMENT__', 'MERCHANT_ACCOUNT': None}
             for col in metric_cols:
                 adjustment_row[col] = -adjustment_values[col]
             final_rows.append(adjustment_row)
 
     result_df = pd.DataFrame(final_rows)
-    
+
     if 'Card Type' in result_df.columns:
         result_df['sorter'] = np.where(result_df['Merchant'] == 'All', 0, 1)
         result_df['Card Type'] = pd.Categorical(result_df['Card Type'].fillna(''), categories=[''] + payment_method_order, ordered=True)
-        result_df = result_df.sort_values(['Business Unit', 'sorter', 'Merchant', 'MERCHANT_ACCOUNT', 'TRADING_MONTH', 'Card Type']).drop('sorter', axis=1)
+        result_df = result_df.sort_values(['Business Unit', 'sorter', 'Merchant', 'MERCHANT_ACCOUNT', 'Card Type']).drop('sorter', axis=1)
+
+    # --- Before merge, print columns for debug ---
+    print('BEFORE MERGE:', result_df.columns.tolist())
 
     return result_df
 
@@ -592,162 +591,135 @@ def apply_reduce_coa_credit(df):
     
     return df_copy
 
-@st.cache_data(ttl=60)  # Cache for 1 minute to allow for updates
-def get_incentives_data(bu_list, merchant_list, month_list, cache_buster=None):
-    """Fetch incentives data, correctly aggregated, for each merchant and month."""
-    conn = init_snowflake_connection()
-    if not conn:
-        return pd.DataFrame()
-    
-    where_clauses = []
-    if bu_list and len(bu_list) < len(business_units):
-        bu_str = ", ".join([f"'{b}'" for b in bu_list])
-        where_clauses.append(f"r.SOURCE IN ({bu_str})")
-    if merchant_list and len(merchant_list) < len(merchants):
-        escaped_merchants = [m.replace("'", "''") for m in merchant_list]
-        merchant_str = ", ".join([f"'{m}'" for m in escaped_merchants])
-        where_clauses.append(f"r.DISPLAY_NAME IN ({merchant_str})")
-    if month_list and len(month_list) < len(months_desc):
-        month_str = ", ".join([f"'{m}'" for m in month_list])
-        where_clauses.append(f"r.TRADING_MONTH IN ({month_str})")
-    
-    where_clause = " AND ".join(where_clauses) if where_clauses else "1=1"
-    
-    query = f"""
-    WITH incentives_agg AS (
-        SELECT
-            MERCHANT_ID,
-            TRADING_MONTH,
-            SUM(
-                COALESCE(ADV_PLUS_SUBSIDY_DISCOUNT, 0) +
-                COALESCE(SAAS_SUBSIDY_DISCOUNT, 0) +
-                COALESCE(TERMINAL_SUBSIDY_DISCOUNT, 0)
-            ) AS INCENTIVES
-        FROM dia_db.public.incentives_hubspot
-        GROUP BY MERCHANT_ID, TRADING_MONTH
-    )
-    SELECT 
-        CASE 
-            WHEN r.SOURCE = 'Swiftpos_Reseller' THEN 'SwiftPOS Res'
-            WHEN r.SOURCE = 'OolioPay' THEN 'Oolio Pay'
-            WHEN r.SOURCE = 'IdealPOS_Reseller' THEN 'IdealPOS Res'
-            WHEN r.SOURCE IN ('Oolio', 'OolioPaymentPlatform') THEN 'Oolio Platform'
-            WHEN r.SOURCE = 'Deliverit' THEN 'Deliverit'
-            WHEN r.SOURCE = 'DeliverIT MoR' THEN 'DeliverIT MoR'
-            ELSE r.SOURCE
-        END AS "Business Unit",
-        r.DISPLAY_NAME AS "Merchant",
-        r.TRADING_MONTH,
-        r.MERCHANT_ACCOUNT AS "MERCHANT_ID",
-        COALESCE(i.INCENTIVES, 0) AS "INCENTIVES"
-    FROM dia_db.public.rba_model_data r
-    LEFT JOIN incentives_agg i
-        ON r.MERCHANT_ACCOUNT = i.MERCHANT_ID
-        AND r.TRADING_MONTH = i.TRADING_MONTH
-    WHERE {where_clause}
-    GROUP BY 1, 2, 3, 4, i.INCENTIVES
-    ORDER BY "Business Unit", "Merchant", r.TRADING_MONTH
+# --- New function for Scenario 4: Card Mix Changes ---
+def apply_card_mix_scenario(df):
     """
-    try:
-        df = pd.read_sql(query, conn)
-        print('incentives_df columns from SQL:', df.columns.tolist())
-        print('incentives_df shape:', df.shape)
-        if not df.empty:
-            print('incentives_df sample data:')
-            print(df.head())
-        # --- Safe fillna for incentives sum calculation ---
-        def safe_fillna(series_or_scalar):
-            try:
-                return series_or_scalar.fillna(0)
-            except AttributeError:
-                return series_or_scalar
-        df['INCENTIVES'] = (
-            safe_fillna(df.get('ADV_PLUS_SUBSIDY_DISCOUNT', 0)) +
-            safe_fillna(df.get('SAAS_SUBSIDY_DISCOUNT', 0)) +
-            safe_fillna(df.get('TERMINAL_SUBSIDY_DISCOUNT', 0))
-        )
-        return df
-    except Exception as e:
-        st.error(f"Error fetching incentives data: {str(e)}")
-        return pd.DataFrame()
+    Optimized: Applies card mix scenario by changing TTV assumption percentages and recalculating all assumption values.
+    Uses custom card type percentages for Scenario 4, applied per BU or merchant group, vectorized for speed.
+    """
+    df_copy = df.copy()
+    
+    # Ensure correct data types
+    numeric_cols = [
+        'TTV', 'TTV (Assump)', '% of Parent Total (Assump)',
+        'MSF ex gst', 'MSF Bips', 'MSF ex gst (Assump)', 'MSF Bips (Assump)',
+        'COA ex gst', 'COA Bips', 'COA ex gst (Assump)', 'COA Bips (Assump)',
+        'GP ex gst', 'GP Bips', 'GP ex gst (Assump)', 'GP Bips (Assump)'
+    ]
+    for col in numeric_cols:
+        if col in df_copy.columns:
+            df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce').fillna(0)
+
+    # Card type percentages for Scenario 4
+    card_type_percentages = {
+        'AMEX': 0.05,      # 5%
+        'EFTPOS': 0.40,    # 40%
+        'Dom.DR': 0.25,    # 25%
+        'Dom.CR': 0.04,    # 4%
+        'Prem.DR': 0.07,   # 7%
+        'Prem.CR': 0.15,   # 15%
+        'Int.DR': 0.02,    # 2%
+        'Int.CR': 0.02     # 2%
+    }
+    
+    # Only apply to rows that are card types in payment_method_order
+    card_type_mask = df_copy['Card Type'].isin(payment_method_order)
+    df_types = df_copy[card_type_mask].copy()
+    
+    # Determine group columns
+    group_cols = []
+    if 'Business Unit' in df_copy.columns:
+        group_cols.append('Business Unit')
+    if 'Merchant' in df_copy.columns:
+        group_cols.append('Merchant')
+    
+    # Compute group total TTV for each row
+    df_types['Group_TTV'] = df_types.groupby(group_cols)['TTV'].transform('sum')
+    # Map card type percentages
+    df_types['CardTypePct'] = df_types['Card Type'].map(card_type_percentages).fillna(0)
+    # Calculate new TTV (Assump) and %
+    df_types['TTV (Assump)'] = df_types['CardTypePct'] * df_types['Group_TTV']
+    df_types['% of Parent Total (Assump)'] = df_types['CardTypePct'] * 100
+    # MSF/COA/GP assumption values
+    df_types['MSF ex gst (Assump)'] = df_types['TTV (Assump)'] * df_types['MSF Bips (Assump)'] / 10000
+    df_types['COA ex gst (Assump)'] = df_types['TTV (Assump)'] * df_types['COA Bips (Assump)'] / 10000
+    df_types['GP ex gst (Assump)'] = df_types['MSF ex gst (Assump)'] - df_types['COA ex gst (Assump)']
+    df_types['GP Bips (Assump)'] = np.where(
+        df_types['TTV (Assump)'] > 0,
+        (df_types['GP ex gst (Assump)'] / df_types['TTV (Assump)']) * 10000,
+        0
+    )
+    # Update the main DataFrame only for card type rows
+    for col in ['TTV (Assump)', '% of Parent Total (Assump)', 'MSF ex gst (Assump)', 'COA ex gst (Assump)', 'GP ex gst (Assump)', 'GP Bips (Assump)']:
+        df_copy.loc[df_types.index, col] = df_types[col]
+    # Clean up
+    for col in numeric_cols:
+        if col in df_copy.columns:
+            df_copy[col] = df_copy[col].fillna(0)
+    df_copy = convert_numpy_types(df_copy)
+    return df_copy
+
+# --- New function for Scenario 5: Churn (15% churn after Scenario 4) ---
+def apply_churn_scenario(df):
+    """
+    Applies Scenario 4 (card mix), then multiplies all Assump values for each Business Unit and 'All' merchant by 0.85 (15% churn), and recalculates Assump % and Bips.
+    """
+    # Step 1: Apply Scenario 4 (card mix)
+    df_churn = apply_card_mix_scenario(df.copy())
+    # Step 2: For each Business Unit and 'All' merchant, multiply all Assump values by 0.85
+    churn_factor = 0.85
+    # Only apply to rows that are card types in payment_method_order
+    card_type_mask = df_churn['Card Type'].isin(payment_method_order)
+    # For each group (Business Unit, Merchant), apply churn to 'All' merchant rows and group rows
+    group_cols = []
+    if 'Business Unit' in df_churn.columns:
+        group_cols.append('Business Unit')
+    if 'Merchant' in df_churn.columns:
+        group_cols.append('Merchant')
+    # Apply churn to all card type rows
+    churn_mask = card_type_mask
+    # Multiply all Assump values by churn_factor
+    for col in ['TTV (Assump)', 'MSF ex gst (Assump)', 'COA ex gst (Assump)', 'GP ex gst (Assump)']:
+        if col in df_churn.columns:
+            df_churn.loc[churn_mask, col] = df_churn.loc[churn_mask, col] * churn_factor
+    # Recalculate Assump % and Bips
+    # For each group, recalculate group total TTV (Assump)
+    df_churn['Group_TTV_Assump'] = df_churn.groupby(group_cols)['TTV (Assump)'].transform('sum')
+    df_churn['% of Parent Total (Assump)'] = np.where(
+        df_churn['Group_TTV_Assump'] > 0,
+        df_churn['TTV (Assump)'] / df_churn['Group_TTV_Assump'] * 100,
+        0
+    )
+    # Recalculate Bips
+    df_churn['MSF Bips (Assump)'] = np.where(
+        df_churn['TTV (Assump)'] > 0,
+        df_churn['MSF ex gst (Assump)'] / df_churn['TTV (Assump)'] * 10000,
+        0
+    )
+    df_churn['COA Bips (Assump)'] = np.where(
+        df_churn['TTV (Assump)'] > 0,
+        df_churn['COA ex gst (Assump)'] / df_churn['TTV (Assump)'] * 10000,
+        0
+    )
+    df_churn['GP Bips (Assump)'] = np.where(
+        df_churn['TTV (Assump)'] > 0,
+        df_churn['GP ex gst (Assump)'] / df_churn['TTV (Assump)'] * 10000,
+        0
+    )
+    # Clean up
+    for col in ['Group_TTV_Assump']:
+        if col in df_churn.columns:
+            df_churn.drop(columns=[col], inplace=True)
+    df_churn = convert_numpy_types(df_churn)
+    return df_churn
 
 # --- Main data loading and caching ---
 raw_data = get_metric_data(bu_filter, merchant_filter, acquirer_filter, month_filter, account_manager_filter)
 processed_data = process_data(raw_data)
 
-# --- Fetch and merge incentives data ---
-import time
-# Updated incentives query: aggregate by merchant_id and trading_month, select company as display_name
-incentives_query = f'''
-    SELECT
-        TRADING_MONTH,
-        COMPANY AS DISPLAY_NAME,
-        MERCHANT_ID,
-        ROUND(SUM(COALESCE(ADV_PLUS_SUBSIDY_DISCOUNT,0) + COALESCE(SAAS_SUBSIDY_DISCOUNT,0) + COALESCE(TERMINAL_SUBSIDY_DISCOUNT,0)), 2) AS INCENTIVES
-    FROM dia_db.public.incentives_hubspot
-    WHERE 1=1
-    GROUP BY TRADING_MONTH, COMPANY, MERCHANT_ID
-'''
-conn = init_snowflake_connection()
-incentives_df = pd.read_sql(incentives_query, conn)
-incentives_df.columns = [col.upper() for col in incentives_df.columns]
-print('INCENTIVES_DF SAMPLE:', incentives_df.head())
-print('INCENTIVES_DF COLUMNS:', incentives_df.columns)
-
-# --- Merge incentives only to merchant-level rows ---
-print('PROCESSED_DATA COLUMNS:', processed_data.columns.tolist())
-# Merchant-level: Card Type is null/empty or Merchant != 'All'
-is_merchant_level = (processed_data['Card Type'].isnull() | (processed_data['Card Type'] == '')) & (processed_data['Merchant'] != 'All')
-processed_data['INCENTIVES'] = 0.0
-merchant_level_df = processed_data[is_merchant_level].copy()
-print('MERCHANT_LEVEL_DF SAMPLE:', merchant_level_df[['Merchant','MERCHANT_ACCOUNT','TRADING_MONTH']].head())
-merged = merchant_level_df.merge(
-    incentives_df[['MERCHANT_ID','TRADING_MONTH','INCENTIVES']],
-    left_on=['MERCHANT_ACCOUNT','TRADING_MONTH'],
-    right_on=['MERCHANT_ID','TRADING_MONTH'],
-    how='left'
-)
-print('MERGED COLUMNS:', merged.columns)
-print('MERGED SAMPLE:', merged.head())
-# Robust incentives column selection
-incentives_col = None
-for col in merged.columns:
-    if col.lower() == 'incenitives':  # typo check
-        incentives_col = col
-        break
-    if col.lower() == 'incentives':
-        incentives_col = col
-        break
-    if 'incentive' in col.lower():
-        incentives_col = col
-if incentives_col:
-    merged['INCENTIVES'] = merged[incentives_col].fillna(0)
-else:
-    merged['INCENTIVES'] = 0
-# Use a robust key-based map for assignment
-key = list(zip(merchant_level_df['MERCHANT_ACCOUNT'], merchant_level_df['TRADING_MONTH']))
-incentive_map = dict(
-    zip(
-        zip(incentives_df['MERCHANT_ID'], incentives_df['TRADING_MONTH']),
-        incentives_df['INCENTIVES']
-    )
-)
-processed_data.loc[is_merchant_level, 'INCENTIVES'] = [incentive_map.get(k, 0) for k in key]
-
-# For Business Unit ("All") rows, sum incentives from child merchant rows
-is_bu_level = (processed_data['Merchant'] == 'All') & (processed_data['Card Type'].isnull() | (processed_data['Card Type'] == ''))
-for idx in processed_data[is_bu_level].index:
-    bu = processed_data.at[idx, 'Business Unit']
-    bu_incentives = processed_data[(processed_data['Business Unit'] == bu) & is_merchant_level]['INCENTIVES'].sum()
-    processed_data.at[idx, 'INCENTIVES'] = bu_incentives
-
-# For card type rows, incentives should be 0
-is_card_type = ~(is_merchant_level | is_bu_level)
-processed_data.loc[is_card_type, 'INCENTIVES'] = 0.0
-
-# --- Rename and calculate GP columns ---
-processed_data['GP before Inc'] = processed_data['GP ex gst']
-processed_data['GP after Inc'] = processed_data['GP before Inc'] - processed_data['INCENTIVES']
+# After processed_data is defined, store the true base data in session state if not already present
+if 'base_processed_data' not in st.session_state:
+    st.session_state['base_processed_data'] = processed_data.copy()
 
 # --- State Management for Editable Grid ---
 # Initialize a counter for forcing grid updates. This is the key to the fix.
@@ -776,7 +748,7 @@ if 'Merchant' in df_for_grid.columns:
 st.markdown("<h5>Interactive Buttons</h5>", unsafe_allow_html=True)
 
 # --- Buttons above the table ---
-col1, col2, col3, col4, col5 = st.columns([1, 1, 1, 1, 3])
+col1, col2, col3, col4, col5, col6 = st.columns([1, 1, 1, 1, 1, 2])
 with col1:
     update_button = st.button("Update Model Table", type="primary", help="Apply assumption changes to the model table")
 with col2:
@@ -785,6 +757,16 @@ with col3:
     no_surcharge_credit_button = st.button("Scenario 2", type="primary", help="Set Debit Bips to 65 and increase Credit Surcharge Bips as specified")
 with col4:
     reduce_coa_credit_button = st.button("Scenario 3", type="primary", help="Reduce COA Bips on credit cards as per business rule")
+with col5:
+    card_mix_button = st.button("Scenario 4", type="primary", help="Apply custom card mix percentages (AMEX:5%, EFTPOS:40%, Dom.DR:25%, etc.) and recalculate assumption values")
+with col6:
+    churn_button = st.button("Scenario 5", type="primary", help="Apply Scenario 4 with 15% churn (multiply all Assump values by 85%)")
+
+# --- Scenario 5 button handler ---
+if churn_button:
+    st.session_state.edited_data[grid_key_base] = apply_churn_scenario(df_for_grid.copy())
+    st.session_state.update_counter += 1
+    st.rerun()
 
 # --- Display Grid ---
 total_row_data = None
@@ -925,7 +907,7 @@ function(params) {
 }
 """)
 
-# --- Define grid options dictionary manually ---
+# Define grid options dictionary manually
 grid_options = {
     "columnDefs": [
         {"field": "Business Unit", "rowGroup": True, "hide": True},
@@ -935,14 +917,16 @@ grid_options = {
         {"field": "SURCHARGE", "aggFunc": "sum", "hide": True},
         {"headerName": "TTV", "headerClass": "center-aligned-header", "children": [
             {"field": "TTV", "headerName": "Base", "aggFunc": "sum", "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": {"textAlign": "right"}},
+            # Use the new JS valueGetter for the Base % column
             {"headerName": "%", "valueGetter": base_pct_getter, "valueFormatter": "value == null ? '' : Number(value).toFixed(2) + '%'"},
             {"field": "TTV (Assump)", "headerName": "Assump", "aggFunc": "sum", "editable": True, "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": assump_cell_style_right},
+            # Use the new JS valueGetter and valueSetter for the Assump % column
             {"headerName": "%", "editable": True, "valueGetter": assump_pct_getter, "valueSetter": assump_pct_setter, "valueFormatter": "value == null ? '' : Number(value).toFixed(2) + '%'", "cellStyle": assump_cell_style_default}
         ]},
         {"headerName": "MSF", "headerClass": "center-aligned-header", "children": [
             {"field": "MSF ex gst", "headerName": "Base", "aggFunc": "sum", "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": {"textAlign": "right"}},
-            {"field": "MSF ex gst (Assump)", "headerName": "Assump", "aggFunc": "sum", "editable": True, "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": assump_cell_style_right},
-            {"headerName": "Bips", "valueFormatter": "x == null ? '' : Number(x).toFixed(2)", "cellStyle": assump_cell_style_default, "valueGetter": JsCode("""
+            # Add a valueGetter for custom BIPS calculation on group rows
+            {"headerName": "Bips", "valueFormatter": "x == null ? '' : Number(x).toFixed(2)", "valueGetter": JsCode("""
                 function(params) {
                     if (!params.node.group) { return params.data['MSF Bips']; }
                     const msf = params.node.aggData['MSF ex gst'];
@@ -952,6 +936,7 @@ grid_options = {
                     return 0;
                 }
             """)},
+            {"field": "MSF ex gst (Assump)", "headerName": "Assump", "aggFunc": "sum", "editable": True, "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": assump_cell_style_right},
             {"headerName": "Bips", "editable": True, "valueFormatter": "x == null ? '' : Number(x).toFixed(2)", "cellStyle": assump_cell_style_default, "valueGetter": JsCode("""
                 function(params) {
                     if (!params.node.group) { return params.data['MSF Bips (Assump)']; }
@@ -965,6 +950,15 @@ grid_options = {
         ]},
         {"headerName": "COA", "headerClass": "center-aligned-header", "children": [
             {"field": "COA ex gst", "headerName": "Base", "aggFunc": "sum", "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": {"textAlign": "right"}},
+            {"headerName": "Bips", "valueFormatter": "x == null ? '' : Number(x).toFixed(2)", "valueGetter": JsCode("""
+                function(params) {
+                    if (!params.node.group) { return params.data['COA Bips']; }
+                    const coa = params.node.aggData['COA ex gst'];
+                    const ttv = params.node.aggData['TTV'];
+                    if (ttv > 0) { return (coa / ttv) * 10000; }
+                    return 0;
+                }
+            """)},
             {"field": "COA ex gst (Assump)", "headerName": "Assump", "aggFunc": "sum", "editable": True, "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": assump_cell_style_right},
             {
                 "headerName": "Bips",
@@ -973,9 +967,9 @@ grid_options = {
                 "cellStyle": assump_cell_style_default,
                 "valueGetter": JsCode("""
                     function(params) {
-                        if (!params.node.group) { return params.data['COA Bips']; }
-                        const coa = params.node.aggData['COA ex gst'];
-                        const ttv = params.node.aggData['TTV'];
+                        if (!params.node.group) { return params.data['COA Bips (Assump)']; }
+                        const coa = params.node.aggData['COA ex gst (Assump)'];
+                        const ttv = params.node.aggData['TTV (Assump)'];
                         if (ttv > 0) { return (coa / ttv) * 10000; }
                         return 0;
                     }
@@ -983,7 +977,7 @@ grid_options = {
                 "valueSetter": JsCode("""
                     function(params) {
                         if (params.data && !params.node.group) {
-                            params.data['COA Bips'] = Number(params.newValue);
+                            params.data['COA Bips (Assump)'] = Number(params.newValue);
                             return true;
                         }
                         return false;
@@ -993,8 +987,7 @@ grid_options = {
         ]},
         {"headerName": "GP", "headerClass": "center-aligned-header", "children": [
             {"field": "GP ex gst", "headerName": "Base", "aggFunc": "sum", "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": {"textAlign": "right"}},
-            {"field": "GP ex gst (Assump)", "headerName": "Assump", "aggFunc": "sum", "editable": True, "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": assump_cell_style_right},
-            {"headerName": "Bips", "editable": False, "valueFormatter": "x == null ? '' : Number(x).toFixed(2)", "cellStyle": assump_cell_style_default, "valueGetter": JsCode("""
+            {"headerName": "Bips", "valueFormatter": "x == null ? '' : Number(x).toFixed(2)", "valueGetter": JsCode("""
                 function(params) {
                     if (!params.node.group) { return params.data['GP Bips']; }
                     const gp = params.node.aggData['GP ex gst'];
@@ -1002,9 +995,44 @@ grid_options = {
                     if (ttv > 0) { return (gp / ttv) * 10000; }
                     return 0;
                 }
+            """)},
+            {"field": "GP ex gst (Assump)", "headerName": "Assump", "aggFunc": "sum", "editable": True, "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": assump_cell_style_right},
+            {"headerName": "Bips", "editable": False, "valueFormatter": "x == null ? '' : Number(x).toFixed(2)", "cellStyle": assump_cell_style_default, "valueGetter": JsCode("""
+                function(params) {
+                    if (!params.node.group) { return params.data['GP Bips (Assump)']; }
+                    const gp = params.node.aggData['GP ex gst (Assump)'];
+                    const ttv = params.node.aggData['TTV (Assump)'];
+                    if (ttv > 0) { return (gp / ttv) * 10000; }
+                    return 0;
+                }
             """)}
         ]},
-        {"field": "INCENTIVES", "headerName": "Incentives", "type": "numericColumn", "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": {"textAlign": "right"}}
+        {"headerName": "Incentives", "headerClass": "center-aligned-header", "children": [
+            {"field": "INCENTIVES_BASE", "headerName": "Base", "type": "numericColumn", "valueGetter": JsCode("""
+                function(params) {{
+                    if (!params.data || params.data['Card Type']) return '';
+                    return params.data['INCENTIVES_BASE'];
+                }}
+            """), "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": {"textAlign": "right"}},
+            {"field": "INCENTIVES_BIPS", "headerName": "Bips", "type": "numericColumn", "valueGetter": JsCode("""
+                function(params) {{
+                    if (!params.data || params.data['Card Type']) return '';
+                    return params.data['INCENTIVES_BIPS'];
+                }}
+            """), "valueFormatter": "x == null ? '' : Number(x).toFixed(2)", "cellStyle": {"textAlign": "right"}},
+            {"field": "INCENTIVES_ASSUMP_BASE", "headerName": "Assump", "type": "numericColumn", "valueGetter": JsCode("""
+                function(params) {{
+                    if (!params.data || params.data['Card Type']) return '';
+                    return params.data['INCENTIVES_ASSUMP_BASE'];
+                }}
+            """), "valueFormatter": "x == null ? '' : x.toLocaleString(undefined, {maximumFractionDigits:0})", "cellStyle": {"textAlign": "right"}},
+            {"field": "INCENTIVES_ASSUMP_BIPS", "headerName": "Bips", "type": "numericColumn", "valueGetter": JsCode("""
+                function(params) {{
+                    if (!params.data || params.data['Card Type']) return '';
+                    return params.data['INCENTIVES_ASSUMP_BIPS'];
+                }}
+            """), "valueFormatter": "x == null ? '' : Number(x).toFixed(2)", "cellStyle": {"textAlign": "right"}}
+        ]}
     ],
     "defaultColDef": {"resizable": True, "width": 110},
     "groupDefaultExpanded": 0,
@@ -1048,20 +1076,22 @@ if update_button:
     st.rerun()
 
 if surcharge_ban_button:
-    # Use the data currently in the grid display for the calculation
-    df_surcharge = df_for_grid.copy()
-    df_surcharge = apply_surcharge_ban(df_surcharge)
-    st.session_state.edited_data[grid_key_base] = df_surcharge
+    st.session_state.edited_data[grid_key_base] = apply_surcharge_ban(df_for_grid.copy())
     st.session_state.update_counter += 1
     st.rerun()
 
 if no_surcharge_credit_button:
-    st.session_state.edited_data[grid_key_base] = apply_no_surcharge_increase_credit(df_for_grid)
+    st.session_state.edited_data[grid_key_base] = apply_no_surcharge_increase_credit(df_for_grid.copy())
     st.session_state.update_counter += 1
     st.rerun()
 
 if reduce_coa_credit_button:
-    st.session_state.edited_data[grid_key_base] = apply_reduce_coa_credit(df_for_grid)
+    st.session_state.edited_data[grid_key_base] = apply_reduce_coa_credit(df_for_grid.copy())
+    st.session_state.update_counter += 1
+    st.rerun()
+
+if card_mix_button:
+    st.session_state.edited_data[grid_key_base] = apply_card_mix_scenario(df_for_grid.copy())
     st.session_state.update_counter += 1
     st.rerun()
 
@@ -1139,6 +1169,11 @@ with top_cols[1]:
         key="download-csv-btn",
         help="Download the current model table (All and Merchant level, with card types) as CSV."
     )
+
+gb = GridOptionsBuilder.from_dataframe(df_for_grid)
+gb.configure_column("INCENTIVES", type=["numericColumn"], aggFunc="sum", valueFormatter="x.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})")
+# ... configure other columns as needed ...
+grid_options = gb.build()
 
 grid_response = AgGrid(
     df_for_grid,
@@ -1323,193 +1358,245 @@ styled = styled.apply(lambda x: ['background-color: #f2f9ff' if i%2==0 else 'bac
 styled = styled.apply(highlight_selected_scenario, axis=1)
 st.table(styled)
 
-# Debug: print join keys and types
-print('Sample MERCHANT_ACCOUNT from main data:', merchant_level_df['MERCHANT_ACCOUNT'].head(10).tolist())
-print('Sample TRADING_MONTH from main data:', merchant_level_df['TRADING_MONTH'].head(10).tolist())
-print('Sample MERCHANT_ID from incentives:', incentives_df['MERCHANT_ID'].head(10).tolist())
-print('Sample TRADING_MONTH from incentives:', incentives_df['TRADING_MONTH'].head(10).tolist())
-print('Unique MERCHANT_ACCOUNT types:', merchant_level_df['MERCHANT_ACCOUNT'].map(type).unique())
-print('Unique MERCHANT_ID types:', incentives_df['MERCHANT_ID'].map(type).unique())
-# Convert both to string for robust matching
-merchant_level_df['MERCHANT_ACCOUNT'] = merchant_level_df['MERCHANT_ACCOUNT'].astype(str)
-incentives_df['MERCHANT_ID'] = incentives_df['MERCHANT_ID'].astype(str)
-
-# --- Fetch and merge incentives data ---
-# Get all months for incentives
-incentives_query = '''
-WITH incentives_agg AS (
-    SELECT
-        MERCHANT_ID,
-        TRADING_MONTH,
-        SUM(
-            COALESCE(ADV_PLUS_SUBSIDY_DISCOUNT, 0) +
-            COALESCE(SAAS_SUBSIDY_DISCOUNT, 0) +
-            COALESCE(TERMINAL_SUBSIDY_DISCOUNT, 0)
-        ) AS INCENTIVES
-    FROM dia_db.public.incentives_hubspot
-    GROUP BY MERCHANT_ID, TRADING_MONTH
-)
-SELECT 
-    CASE 
-        WHEN r.SOURCE = 'Swiftpos_Reseller' THEN 'SwiftPOS Res'
-        WHEN r.SOURCE = 'OolioPay' THEN 'Oolio Pay'
-        WHEN r.SOURCE = 'IdealPOS_Reseller' THEN 'IdealPOS Res'
-        WHEN r.SOURCE IN ('Oolio', 'OolioPaymentPlatform') THEN 'Oolio Platform'
-        WHEN r.SOURCE = 'Deliverit' THEN 'Deliverit'
-        WHEN r.SOURCE = 'DeliverIT MoR' THEN 'DeliverIT MoR'
-        ELSE r.SOURCE
-    END AS BUSINESS_UNIT,
-    r.DISPLAY_NAME AS MERCHANT,
-    r.MERCHANT_ACCOUNT AS MERCHANT_ACCOUNT,
-    r.TRADING_MONTH,
-    COALESCE(i.INCENTIVES, 0) AS INCENTIVES
-FROM dia_db.public.rba_model_data r
-LEFT JOIN incentives_agg i
-    ON r.MERCHANT_ACCOUNT = i.MERCHANT_ID
-    AND r.TRADING_MONTH = i.TRADING_MONTH
-GROUP BY 1, 2, 3, 4, i.INCENTIVES
-ORDER BY BUSINESS_UNIT, MERCHANT, r.TRADING_MONTH
-'''
+# --- Fetch Incentives from rba_incentives and merge at merchant level ---
 conn = init_snowflake_connection()
-incentives_df = pd.read_sql(incentives_query, conn)
-# Standardize column names: uppercase and replace spaces with underscores
-incentives_df.columns = [col.upper().replace(' ', '_') for col in incentives_df.columns]
-print("INCENTIVES_DF COLUMNS:", incentives_df.columns.tolist())
-print("INCENTIVES_DF HEAD:")
-print(incentives_df.head())
-# Robust incentives column detection
-incentives_col = None
-for col in incentives_df.columns:
-    if col.strip().lower() == 'incentives':
-        incentives_col = col
-        break
-if incentives_col is None:
-    print("INCENTIVES column not found in incentives_df!")
-    incentives_df['INCENTIVES'] = 0
-    incentives_col = 'INCENTIVES'
-# Merge on all keys
-processed_data = processed_data.merge(
-    incentives_df[['BUSINESS_UNIT', 'MERCHANT_ACCOUNT', 'MERCHANT', 'TRADING_MONTH', incentives_col]],
-    left_on=['Business Unit', 'MERCHANT_ACCOUNT', 'Merchant', 'TRADING_MONTH'],
-    right_on=['BUSINESS_UNIT', 'MERCHANT_ACCOUNT', 'MERCHANT', 'TRADING_MONTH'],
-    how='left'
-)
-print("PROCESSED_DATA COLUMNS AFTER MERGE:", processed_data.columns.tolist())
-print("PROCESSED_DATA HEAD AFTER MERGE:")
-print(processed_data.head())
-processed_data['INCENTIVES'] = processed_data[incentives_col].fillna(0)
-
-# Standardize join keys before merge
-processed_data['Business Unit'] = processed_data['Business Unit'].str.strip().str.upper()
-processed_data['Merchant'] = processed_data['Merchant'].str.strip().str.upper()
-incentives_df['BUSINESS_UNIT'] = incentives_df['BUSINESS_UNIT'].str.strip().str.upper()
-incentives_df['MERCHANT'] = incentives_df['MERCHANT'].str.strip().str.upper()
-
-# Debug: print sample join keys and unique months before merge
-print('Sample main data:', processed_data[['Business Unit', 'Merchant', 'TRADING_MONTH']].drop_duplicates().head(10))
-print('Sample incentives data:', incentives_df[['BUSINESS_UNIT', 'MERCHANT', 'TRADING_MONTH']].drop_duplicates().head(10))
-print('Unique months in main:', processed_data["TRADING_MONTH"].unique())
-print('Unique months in incentives:', incentives_df["TRADING_MONTH"].unique())
-
-# Debug: print all unique join keys before merge
-print("==== MAIN DATA UNIQUE KEYS ====")
-print(processed_data[['Business Unit', 'Merchant', 'TRADING_MONTH']].drop_duplicates())
-print("==== INCENTIVES DATA UNIQUE KEYS ====")
-print(incentives_df[['BUSINESS_UNIT', 'MERCHANT', 'TRADING_MONTH']].drop_duplicates())
-
-# --- Merge incentives robustly ---
-# Try merge on MERCHANT_ACCOUNT and MERCHANT_ID first
-merged = processed_data.merge(
-    incentives_df[['MERCHANT_ID', 'TRADING_MONTH', 'INCENTIVES']],
-    left_on=['MERCHANT_ACCOUNT', 'TRADING_MONTH'],
-    right_on=['MERCHANT_ID', 'TRADING_MONTH'],
-    how='left',
-    indicator=True
-)
-if merged['_merge'].value_counts().get('both', 0) == 0:
-    print('No matches on MERCHANT_ACCOUNT/MERCHANT_ID, falling back to display name join')
-    # Clean display names for fallback join
-    processed_data['Merchant_clean'] = processed_data['Merchant'].str.strip().str.lower()
-    incentives_df['DISPLAY_NAME_CLEAN'] = incentives_df.get('MERCHANT', incentives_df.get('DISPLAY_NAME', '')).str.strip().str.lower()
-    merged = processed_data.merge(
-        incentives_df[['DISPLAY_NAME_CLEAN', 'TRADING_MONTH', 'INCENTIVES']],
-        left_on=['Merchant_clean', 'TRADING_MONTH'],
-        right_on=['DISPLAY_NAME_CLEAN', 'TRADING_MONTH'],
-        how='left'
-    )
-# Use incentives column from merge, fillna(0)
-if 'INCENTIVES' in merged.columns:
-    merged['INCENTIVES'] = merged['INCENTIVES'].fillna(0)
-else:
-    merged['INCENTIVES'] = 0
-# Calculate Incentives Base, Bips, Assump Base, Assump Bips
-merged['INCENTIVES_BASE'] = merged['INCENTIVES']
-merged['INCENTIVES_BIPS'] = np.where(
-    merged['TTV'] > 0,
-    (merged['INCENTIVES_BASE'] / merged['TTV']) * 10000,
-    0
-)
-merged['INCENTIVES_ASSUMP_BASE'] = merged['INCENTIVES_BASE']
-merged['INCENTIVES_ASSUMP_BIPS'] = np.where(
-    merged.get('TTV (Assump)', merged['TTV']) > 0,
-    (merged['INCENTIVES_ASSUMP_BASE'] / merged.get('TTV (Assump)', merged['TTV'])) * 10000,
-    0
-)
-processed_data = merged
-
-print('ALL UNIQUE MERCHANT_ACCOUNT (main):', processed_data['MERCHANT_ACCOUNT'].drop_duplicates().tolist())
-print('ALL UNIQUE MERCHANT_ID (incentives):', incentives_df['MERCHANT_ID'].drop_duplicates().tolist())
-print('ALL UNIQUE TRADING_MONTH (main):', processed_data['TRADING_MONTH'].drop_duplicates().tolist())
-print('ALL UNIQUE TRADING_MONTH (incentives):', incentives_df['TRADING_MONTH'].drop_duplicates().tolist())
-
-# --- Use pre-joined incentives table for incentives data ---
 incentives_query = '''
 SELECT
-    "Business Unit",
+    "Business Unit" AS BUSINESS_UNIT,
     MERCHANT_ACCOUNT,
-    "Merchant",
+    "Merchant" AS MERCHANT,
     TRADING_MONTH,
     INCENTIVES
 FROM dia_db.public.rba_incentives
 '''
 incentives_df = pd.read_sql(incentives_query, conn)
-# Standardize column names
 incentives_df.columns = [col.upper() for col in incentives_df.columns]
-# Merge on all keys
-processed_data = processed_data.merge(
-    incentives_df[['BUSINESS_UNIT', 'MERCHANT_ACCOUNT', 'MERCHANT', 'TRADING_MONTH', 'INCENTIVES']],
-    left_on=['Business Unit', 'MERCHANT_ACCOUNT', 'Merchant', 'TRADING_MONTH'],
-    right_on=['BUSINESS_UNIT', 'MERCHANT_ACCOUNT', 'MERCHANT', 'TRADING_MONTH'],
-    how='left'
-)
-processed_data['INCENTIVES'] = processed_data['INCENTIVES'].fillna(0)
-# Calculate Incentives Base, Bips, Assump Base, Assump Bips
-processed_data['INCENTIVES_BASE'] = processed_data['INCENTIVES']
-processed_data['INCENTIVES_BIPS'] = np.where(
-    processed_data['TTV'] > 0,
-    (processed_data['INCENTIVES_BASE'] / processed_data['TTV']) * 10000,
-    0
-)
-processed_data['INCENTIVES_ASSUMP_BASE'] = processed_data['INCENTIVES_BASE']
-processed_data['INCENTIVES_ASSUMP_BIPS'] = np.where(
-    processed_data.get('TTV (Assump)', processed_data['TTV']) > 0,
-    (processed_data['INCENTIVES_ASSUMP_BASE'] / processed_data.get('TTV (Assump)', processed_data['TTV'])) * 10000,
-    0
-)
 
-# Minimal merge test for diagnostics
-print("INCENTIVES_DF COLUMNS:", incentives_df.columns.tolist())
-print("INCENTIVES_DF HEAD:")
-print(incentives_df.head())
-print("PROCESSED_DATA COLUMNS BEFORE MERGE:", processed_data.columns.tolist())
-print("PROCESSED_DATA HEAD BEFORE MERGE:")
-print(processed_data.head())
-test_merge = processed_data.merge(
-    incentives_df,
-    how='left',
-    left_on=['MERCHANT_ACCOUNT', 'TRADING_MONTH'],
-    right_on=['MERCHANT_ACCOUNT', 'TRADING_MONTH']
-)
-print("TEST_MERGE COLUMNS:", test_merge.columns.tolist())
-print("TEST_MERGE HEAD:")
-print(test_merge.head())
+# Verify the incentives data (silent)
+# print("\n=== INCENTIVES DATA VERIFICATION ===")
+# print(f"Incentives table shape: {incentives_df.shape}")
+# print(f"Unique Business Units in incentives: {incentives_df['BUSINESS_UNIT'].nunique()}")
+# print(f"Unique months in incentives: {incentives_df['TRADING_MONTH'].nunique()}")
+
+# Show incentive values by Business Unit (silent)
+# print("\nIncentive values by Business Unit:")
+# bu_incentives = incentives_df.groupby('BUSINESS_UNIT')['INCENTIVES'].agg(['count', 'sum', 'mean', 'min', 'max'])
+# print(bu_incentives)
+
+# Show sample of actual incentives data (silent)
+# print("\nSample incentives data:")
+# print(incentives_df[['BUSINESS_UNIT', 'MERCHANT', 'TRADING_MONTH', 'INCENTIVES']].head(20))
+
+# SIMPLE APPROACH: Let's see what data we actually have (silent)
+# print("\n=== DATA ANALYSIS ===")
+# print(f"Main data shape: {processed_data.shape}")
+# print(f"Incentives data shape: {incentives_df.shape}")
+
+# Check what business units we have in each dataset (silent)
+# print("\n=== BUSINESS UNITS COMPARISON ===")
+main_bus = processed_data['Business Unit'].unique()
+incentives_bus = incentives_df['BUSINESS_UNIT'].unique()
+# print(f"Main data Business Units ({len(main_bus)}): {sorted([str(x) for x in main_bus])}")
+# print(f"Incentives Business Units ({len(incentives_bus)}): {sorted([str(x) for x in incentives_bus])}")
+
+# Check what months we have (silent)
+# print("\n=== MONTHS COMPARISON ===")
+main_months = processed_data['TRADING_MONTH'].unique()
+incentives_months = incentives_df['TRADING_MONTH'].unique()
+# print(f"Main data Months ({len(main_months)}): {sorted([str(x) for x in main_months])}")
+# print(f"Incentives Months ({len(incentives_months)}): {sorted([str(x) for x in incentives_months])}")
+
+# Check merchant-level data specifically (silent)
+merchant_level_df = processed_data[processed_data['Card Type'].isnull() | (processed_data['Card Type'] == '')]
+# print(f"\nMerchant-level rows in main data: {len(merchant_level_df)}")
+
+# Show sample of merchant names from both datasets (silent)
+# print("\n=== SAMPLE MERCHANT NAMES ===")
+# print("MAIN DATA MERCHANTS (first 20):")
+# for i, merchant in enumerate(merchant_level_df['Merchant'].unique()[:20]):
+#     print(f"  {i+1}. {merchant}")
+
+# print("\nINCENTIVES MERCHANTS (first 20):")
+# for i, merchant in enumerate(incentives_df['MERCHANT'].unique()[:20]):
+#     print(f"  {i+1}. {merchant}")
+
+# Try exact matching first (silent)
+# print("\n=== EXACT MATCHING TEST ===")
+exact_matches = 0
+for idx, row in merchant_level_df.iterrows():
+    bu = str(row['Business Unit'])
+    merchant = str(row['Merchant'])
+    month = str(row['TRADING_MONTH'])
+    
+    # Look for exact match
+    match = incentives_df[
+        (incentives_df['BUSINESS_UNIT'].astype(str) == bu) & 
+        (incentives_df['MERCHANT'].astype(str) == merchant) & 
+        (incentives_df['TRADING_MONTH'].astype(str) == month)
+    ]
+    
+    if len(match) > 0:
+        exact_matches += 1
+        # print(f"EXACT MATCH: {merchant} (BU: {bu}, Month: {month}) -> Incentives: {match.iloc[0]['INCENTIVES']}")
+
+# print(f"\nExact matches found: {exact_matches} out of {len(merchant_level_df)}")
+
+# Try case-insensitive matching (silent)
+# print("\n=== CASE-INSENSITIVE MATCHING TEST ===")
+case_insensitive_matches = 0
+for idx, row in merchant_level_df.iterrows():
+    bu = str(row['Business Unit']).upper()
+    merchant = str(row['Merchant']).upper()
+    month = str(row['TRADING_MONTH'])
+    
+    # Look for case-insensitive match
+    match = incentives_df[
+        (incentives_df['BUSINESS_UNIT'].astype(str).str.upper() == bu) & 
+        (incentives_df['MERCHANT'].astype(str).str.upper() == merchant) & 
+        (incentives_df['TRADING_MONTH'].astype(str) == month)
+    ]
+    
+    if len(match) > 0:
+        case_insensitive_matches += 1
+        # print(f"CASE-INSENSITIVE MATCH: {row['Merchant']} (BU: {row['Business Unit']}, Month: {month}) -> Incentives: {match.iloc[0]['INCENTIVES']}")
+
+# print(f"\nCase-insensitive matches found: {case_insensitive_matches} out of {len(merchant_level_df)}")
+
+# Try matching by Business Unit and Month only (ignore merchant name) (silent)
+# print("\n=== BUSINESS UNIT + MONTH MATCHING TEST ===")
+bu_month_matches = 0
+for idx, row in merchant_level_df.iterrows():
+    bu = str(row['Business Unit']).upper()
+    month = str(row['TRADING_MONTH'])
+    
+    # Look for matches by BU and month only
+    matches = incentives_df[
+        (incentives_df['BUSINESS_UNIT'].astype(str).str.upper() == bu) & 
+        (incentives_df['TRADING_MONTH'].astype(str) == month)
+    ]
+    
+    if len(matches) > 0:
+        bu_month_matches += 1
+        # print(f"BU+MONTH MATCH: {row['Merchant']} (BU: {row['Business Unit']}, Month: {month})")
+        # print(f"  Available incentives merchants: {list(matches['MERCHANT'].unique())}")
+
+# print(f"\nBU+Month matches found: {bu_month_matches} out of {len(merchant_level_df)}")
+
+# Remove old diagnostic code that references non-existent columns
+
+# --- Assign Incentives using Business Unit and Month matching ---
+# Since MERCHANT_ID and MERCHANT_ACCOUNT formats don't match, use Business Unit + Month approach
+processed_data['TRADING_MONTH'] = processed_data['TRADING_MONTH'].astype(str)
+incentives_df['TRADING_MONTH'] = incentives_df['TRADING_MONTH'].astype(str)
+
+# Create a lookup dictionary: (Business Unit, Month) -> list of (Merchant, Incentive) pairs
+incentives_lookup = {}
+for _, row in incentives_df.iterrows():
+    bu = str(row['BUSINESS_UNIT']).upper()
+    month = str(row['TRADING_MONTH'])
+    merchant = str(row['MERCHANT']).upper()
+    incentive = row['INCENTIVES']
+    
+    key = (bu, month)
+    if key not in incentives_lookup:
+        incentives_lookup[key] = []
+    incentives_lookup[key].append((merchant, incentive))
+
+# Function to find best merchant match
+def find_best_merchant_match(target_merchant, available_merchants):
+    """
+    Find the best matching merchant from available options using fuzzy matching
+    """
+    target_merchant = str(target_merchant).upper()
+    
+    # First try exact match
+    for merchant, incentive in available_merchants:
+        if str(merchant).upper() == target_merchant:
+            return incentive
+    
+    # Then try partial match
+    for merchant, incentive in available_merchants:
+        if target_merchant in str(merchant).upper() or str(merchant).upper() in target_merchant:
+            return incentive
+    
+    # Finally, try fuzzy matching
+    best_match = None
+    best_ratio = 0
+    for merchant, incentive in available_merchants:
+        ratio = difflib.SequenceMatcher(None, target_merchant, str(merchant).upper()).ratio()
+        if ratio > best_ratio and ratio > 0.6:  # Only consider matches with >60% similarity
+            best_ratio = ratio
+            best_match = incentive
+    
+    return best_match
+
+# Apply incentives to merchant-level rows
+merchant_level_mask = processed_data['Card Type'].isnull() | (processed_data['Card Type'] == '')
+incentives_assigned = 0
+
+for idx, row in processed_data[merchant_level_mask].iterrows():
+    bu = str(row['Business Unit']).upper()
+    month = str(row['TRADING_MONTH'])
+    merchant = str(row['Merchant']).upper()
+    
+    key = (bu, month)
+    
+    if key in incentives_lookup:
+        # Try to find a matching merchant
+        incentive = find_best_merchant_match(merchant, incentives_lookup[key])
+        if incentive is not None:
+            processed_data.at[idx, 'INCENTIVES'] = incentive
+            incentives_assigned += 1
+        else:
+            # If no merchant match, use the first available incentive for this BU+Month
+            processed_data.at[idx, 'INCENTIVES'] = incentives_lookup[key][0][1]
+            incentives_assigned += 1
+    else:
+        processed_data.at[idx, 'INCENTIVES'] = 0.0
+
+# Fill NaN incentives with 0.0 for any remaining rows
+processed_data['INCENTIVES'] = processed_data['INCENTIVES'].fillna(0.0)
+
+# Diagnostic: Show how many incentives were assigned
+print(f"\n=== INCENTIVES ASSIGNMENT SUMMARY ===")
+print(f"Total incentives assigned: {incentives_assigned}")
+print(f"Total merchant-level rows: {len(processed_data[merchant_level_mask])}")
+
+# Show sample of assigned incentives
+print(f"\n=== SAMPLE ASSIGNED INCENTIVES ===")
+sample_assigned = processed_data[merchant_level_mask][['Business Unit', 'Merchant', 'TRADING_MONTH', 'INCENTIVES']].head(10)
+for _, row in sample_assigned.iterrows():
+    print(f"  {row['Merchant']} (BU: {row['Business Unit']}, Month: {row['TRADING_MONTH']}) -> {row['INCENTIVES']}")
+
+# Show non-zero incentives
+non_zero_count = len(processed_data[merchant_level_mask][processed_data[merchant_level_mask]['INCENTIVES'] != 0])
+print(f"\nMerchants with non-zero incentives: {non_zero_count}")
+
+# --- Calculate Incentives columns ---
+is_merchant_level = processed_data['Card Type'].isnull() | (processed_data['Card Type'] == '')
+processed_data.loc[is_merchant_level, 'INCENTIVES_BASE'] = processed_data.loc[is_merchant_level, 'INCENTIVES']
+processed_data.loc[is_merchant_level, 'INCENTIVES_BIPS'] = (
+    processed_data.loc[is_merchant_level, 'INCENTIVES'] / processed_data.loc[is_merchant_level, 'TTV']
+).replace([np.inf, -np.inf], 0).fillna(0) * 10000
+processed_data.loc[is_merchant_level, 'INCENTIVES_ASSUMP_BASE'] = processed_data.loc[is_merchant_level, 'INCENTIVES_BASE']
+processed_data.loc[is_merchant_level, 'INCENTIVES_ASSUMP_BIPS'] = processed_data.loc[is_merchant_level, 'INCENTIVES_BIPS']
+
+is_card_type = ~is_merchant_level
+for col in ['INCENTIVES', 'INCENTIVES_BASE', 'INCENTIVES_BIPS', 'INCENTIVES_ASSUMP_BASE', 'INCENTIVES_ASSUMP_BIPS']:
+    processed_data.loc[is_card_type, col] = np.nan
+
+df_for_grid = processed_data[processed_data['Card Type'].isnull() | (processed_data['Card Type'] == '')].copy()
+
+print("\n=== MAIN DATA: BUSINESS UNIT & TRADING_MONTH SAMPLE ===")
+print(processed_data[['Business Unit', 'TRADING_MONTH']].drop_duplicates().head(20))
+
+print("\n=== INCENTIVES DATA: BUSINESS_UNIT & TRADING_MONTH SAMPLE ===")
+print(incentives_df[['BUSINESS_UNIT', 'TRADING_MONTH']].drop_duplicates().head(20))
+
+print("=== DATAFRAME USED IN TABLE ===")
+print(df_for_grid[['Business Unit', 'Merchant', 'TRADING_MONTH', 'INCENTIVES']].head(20))
+print("Non-zero incentives in table data:")
+print(df_for_grid[df_for_grid['INCENTIVES'] != 0][['Business Unit', 'Merchant', 'TRADING_MONTH', 'INCENTIVES']].head(20))
+
+df_for_grid['INCENTIVES'] = 123.45
+print(df_for_grid[['INCENTIVES']].head(20))

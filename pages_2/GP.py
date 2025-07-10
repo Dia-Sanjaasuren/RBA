@@ -64,7 +64,7 @@ def get_filter_options():
 # Remove the dashboard intro/title/description at the top of the COA page
 
 # Page title at the very top
-st.subheader("GP Summary by Card Type")
+st.subheader("GP (before Incentives) Summary by Card Type")
 
 # Get filter options
 business_units, acquirers, months = get_filter_options()
